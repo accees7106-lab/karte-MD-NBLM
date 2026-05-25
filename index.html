@@ -2,8 +2,15 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>トレーニングカルテ</title>
+  <link rel="manifest" href="/karte-MD-NBLM/manifest.json">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="カルテ">
+  <meta name="theme-color" content="#1d4ed8">
+  <link rel="apple-touch-icon" href="/karte-MD-NBLM/icon-192.png">
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     :root{
@@ -1022,6 +1029,13 @@ function toast(msg){
 }
 
 init();
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/karte-MD-NBLM/sw.js')
+      .catch(() => {});
+  });
+}
 </script>
 </body>
 </html>
