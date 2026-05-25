@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>トレーニングカルテ</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --p:#1d4ed8;--pl:#dbeafe;--ph:#1e40af;--ac:#0284c7;
+      --ok:#16a34a;--ng:#dc2626;--bg:#f1f5f9;--card:#fff;
+      --bd:#e2e8f0;--tx:#0f172a;--mu:#64748b;
+      --tb:#e0f2fe;--tbt:#0369a1;
+    }
+    body{font-family:'Hiragino Kaku Gothic ProN','YuGothic','Meiryo',sans-serif;
+      background:var(--bg);color:var(--tx);padding:20px 16px;
+      max-width:860px;margin:0 auto;line-height:1.6}
+    header{text-align:center;margin-bottom:24px}
+    header h1{font-size:1.65rem;color:var(--p)}
+    header p{color:var(--mu);font-size:.87rem;margin-top:2px}
+    .card{background:var(--card);border-radius:6px;padding:20px;
+      margin-bottom:12px;border:1px solid var(--bd)}
+    .card h2{font-size:.95rem;font-weight:700;color:var(--tx);margin-bottom:14px;
+      padding-bottom:7px;border-bottom:1px solid var(--bd);
+      display:flex;align-items:center;gap:7px;letter-spacing:.01em}
+    label{display:block;font-size:.78rem;font-weight:700;color:var(--mu);
+      margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
+    input[type=text],input[type=date],input[type=number],textarea,select{
+      width:100%;padding:8px 11px;border:1.5px solid var(--bd);
+      border-radius:7px;font-size:.92rem;font-family:inherit;
+      color:var(--tx);background:#fff}
+    input:focus,textarea:focus,select:focus{
+      outline:none;border-color:var(--p);box-shadow:0 0 0 3px rgba(29,78,216,.1)}
+    textarea{resize:vertical;min-height:86px;line-height:1.65}
+    .fg{margin-bottom:13px}.fg:last-child{margin-bottom:0}
+    .hint{font-size:.75rem;color:var(--mu);margin-top:3px}
+    .g3{display:grid;grid-template-columns:2fr 1.2fr 1fr;gap:13px}
+    @media(max-width:560px){.g3{grid-template-columns:1fr}}
+
+    /* buttons */
+    .btn{display:inline-flex;align-items:center;gap:4px;padding:7px 13px;
+      border-radius:7px;border:none;cursor:pointer;font-size:.84rem;
+      font-weight:600;font-family:inherit;white-space:nowrap}
+    .bp{background:var(--p);color:#fff}.bp:hover{background:var(--ph)}
+    .bo{background:transparent;color:var(--p);border:1.5px solid var(--p)}
+    .bo:hover{background:var(--pl)}
+    .bs{background:var(--ok);color:#fff}.bs:hover{background:#15803d}
+    .bsm{padding:4px 8px;font-size:.78rem}
+    .bd2{background:transparent;color:var(--ng);border:1.5px solid #fecaca;
+      padding:4px 8px;font-size:.78rem}
+    .bd2:hover{background:#fef2f2}
+
+    /* asset search */
+    .asrow{display:flex;gap:7px;margin-bottom:10px}
+    .asrow input{flex:1;margin-bottom:0}
+
+    /* registration panel */
+    .rp{display:none;background:#f8fafc;border:1.5px solid var(--bd);
+      border-radius:9px;padding:13px;margin-bottom:10px}
+    .rp.open{display:block}
+    .rp-title{font-size:.84rem;font-weight:700;color:var(--ac);margin-bottom:8px}
+    .ri-row{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+    .ri-row input{flex:1}
+    .ri-tags{margin-bottom:7px;min-height:20px}
+    .rtag{display:inline-flex;align-items:center;gap:4px;background:var(--tb);
+      color:var(--tbt);padding:2px 9px;border-radius:20px;
+      font-size:.8rem;font-weight:600;margin:2px 3px 2px 0}
+    .rtag button{background:none;border:none;cursor:pointer;
+      color:var(--tbt);font-size:.72rem;padding:0;line-height:1}
+    .ra{display:flex;gap:7px;margin-top:9px}
+    .type-tgl{display:flex;gap:7px;margin:7px 0}
+    .tt{flex:1;padding:7px;border-radius:7px;border:1.5px solid var(--bd);
+      background:#fff;cursor:pointer;font-size:.83rem;font-family:inherit;
+      text-align:center;color:var(--mu);font-weight:600}
+    .tt.on{border-color:var(--p);background:var(--pl);color:var(--p)}
+
+    /* check blocks */
+    .cb{background:#f8fafc;border:1px solid var(--bd);border-radius:9px;
+      padding:10px 12px;margin-bottom:8px}
+    .cb-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+    .ktag{font-size:.84rem;font-weight:700;color:var(--tbt);
+      background:var(--tb);padding:3px 10px;border-radius:20px}
+    .sub-row{display:flex;align-items:center;gap:7px;margin-bottom:5px;
+      padding-left:6px}
+    .sub-row:last-child{margin-bottom:2px}
+    .slabel{font-size:.81rem;font-weight:600;color:var(--tx);
+      min-width:90px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .pn-sel{width:auto;padding:4px 8px;font-size:.82rem}
+    .cb-note{margin-top:7px;padding-left:6px}
+    .cb-note input{font-size:.82rem;padding:5px 9px;background:#fff;
+      border-color:#e2e8f0;color:var(--mu)}
+    .cb-note input:focus{color:var(--tx)}
+    /* error modal */
+    .err-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);
+      z-index:9998;align-items:center;justify-content:center}
+    .err-overlay.open{display:flex}
+    .err-box{background:#fff;border-radius:12px;padding:22px 24px;max-width:440px;
+      width:90%;box-shadow:0 8px 32px rgba(0,0,0,.2)}
+    .err-box h3{font-size:1rem;color:var(--ng);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+    .err-list{list-style:none;margin-bottom:16px}
+    .err-list li{font-size:.85rem;padding:4px 0;border-bottom:1px solid var(--bd);color:var(--tx)}
+    .err-list li:last-child{border-bottom:none}
+    .err-list li::before{content:"• ";color:var(--ng);font-weight:700}
+
+    /* training blocks */
+    .tb2{background:#f8fafc;border:1px solid var(--bd);border-radius:9px;
+      padding:10px 12px;margin-bottom:8px}
+    .tb2-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}
+    .set-row{display:flex;align-items:center;gap:5px;margin-bottom:5px;padding-left:6px}
+    .set-row input{width:62px;text-align:center;padding:5px 6px}
+    .su{font-size:.8rem;color:var(--mu);font-weight:600}
+
+    /* seitai */
+    .sr{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+    .sr input{flex:1}
+
+    /* session blocks */
+    .sbl{background:#f8fafc;border:1px solid var(--bd);border-radius:9px;
+      padding:11px;margin-bottom:9px}
+    .sbl-hd{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+    .sbl-hd input{flex:1;font-weight:700;font-size:.89rem;padding:5px 10px;background:#fff}
+    .sbl textarea{background:#fff;min-height:80px}
+
+    /* misc */
+    .empty{text-align:center;color:var(--mu);font-size:.84rem;
+      padding:15px;border:2px dashed var(--bd);border-radius:8px}
+    .nbadge{font-size:.67rem;font-weight:700;background:#dcfce7;
+      color:var(--ok);padding:2px 7px;border-radius:20px}
+    .ftag{font-size:.73rem;color:var(--mu)}
+
+    /* generate */
+    .gen-sec{text-align:center;margin:22px 0 10px}
+    .btn-gen{padding:13px 44px;font-size:1.04rem;font-weight:800;
+      font-family:inherit;background:linear-gradient(135deg,var(--p),var(--ac));
+      color:#fff;border:none;border-radius:12px;cursor:pointer;
+      box-shadow:0 4px 14px rgba(29,78,216,.3);letter-spacing:.04em}
+    .btn-gen:hover{box-shadow:0 6px 18px rgba(29,78,216,.4)}
+
+    /* results */
+    .ph{display:none}
+    .result-text{background:#f8fafc;border:1px solid var(--bd);border-radius:8px;
+      padding:14px 16px;font-size:.9rem;white-space:pre-wrap;line-height:1.85;
+      color:var(--tx);word-break:break-word}
+    .res-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+    .res-hd h2{margin-bottom:0;border-bottom:none;padding-bottom:0}
+    .copy-ok{background:#dcfce7;color:var(--ok);border-color:#bbf7d0}
+
+    /* records */
+    .ri{display:flex;align-items:center;justify-content:space-between;
+      padding:8px 12px;border:1px solid var(--bd);border-radius:8px;
+      margin-bottom:7px;font-size:.87rem;background:#fafafa}
+    .rm{color:var(--mu);font-size:.77rem;margin-top:2px}
+    .rac{display:flex;gap:6px}
+    .exp{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+    hr.div{border:none;border-top:2px dashed var(--bd);margin:20px 0}
+
+    /* toast */
+    .toast{position:fixed;bottom:20px;left:50%;
+      transform:translateX(-50%) translateY(12px);
+      background:#0f172a;color:#fff;padding:9px 20px;border-radius:9px;
+      font-size:.87rem;font-weight:600;opacity:0;
+      transition:opacity .2s,transform .2s;z-index:9999;pointer-events:none}
+    .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+    /* export reminder banner */
+    .remind-bar{display:none;align-items:center;justify-content:space-between;
+      gap:10px;background:#fefce8;border:1.5px solid #fde047;border-radius:10px;
+      padding:11px 16px;margin-bottom:14px;font-size:.88rem;color:#713f12}
+    .remind-bar.show{display:flex}
+    .remind-bar strong{font-size:.9rem}
+    .remind-bar-actions{display:flex;gap:8px;flex-shrink:0}
+    /* PIN screen */
+    #pinScreen{position:fixed;inset:0;background:#f1f5f9;z-index:99999;
+      display:flex;align-items:center;justify-content:center}
+    .pin-box{background:#fff;border:1px solid var(--bd);border-radius:8px;
+      padding:36px 32px;width:280px;text-align:center}
+    .pin-box h2{font-size:1.1rem;font-weight:700;color:var(--tx);margin-bottom:4px}
+    .pin-box p{font-size:.82rem;color:var(--mu);margin-bottom:22px}
+    #pinInput{width:140px;text-align:center;font-size:1.6rem;letter-spacing:.4em;
+      padding:10px 8px;border:1.5px solid var(--bd);border-radius:7px;
+      font-family:inherit;color:var(--tx)}
+    #pinInput:focus{outline:none;border-color:var(--p);box-shadow:0 0 0 3px rgba(29,78,216,.1)}
+    #pinError{display:none;color:var(--ng);font-size:.82rem;margin-top:10px}
+    .pin-expire{font-size:.75rem;color:var(--mu);margin-top:14px}
+  </style>
+</head>
+<body>
+
+<!-- PIN認証画面 -->
+<div id="pinScreen">
+  <div class="pin-box">
+    <h2>トレーニングカルテ</h2>
+    <p>PINを入力してください</p>
+    <input type="password" id="pinInput" maxlength="4"
+           inputmode="numeric" pattern="[0-9]*"
+           placeholder="····" autocomplete="off">
+    <div id="pinError">PINが違います</div>
+    <div class="pin-expire">認証は7日間有効です</div>
+  </div>
+</div>
+
+<!-- エクスポートリマインダーバナー -->
+<div class="remind-bar" id="remindBar">
+  <div>
+    <strong>週次エクスポートのリマインダー</strong><br>
+    <span id="remindMsg"></span>
+  </div>
+  <div class="remind-bar-actions">
+    <button class="btn bs bsm" onclick="doExportFromReminder()">今すぐエクスポート</button>
+    <button class="btn bsm" style="border:1px solid #fde047;color:#713f12" onclick="dismissReminder()">後で</button>
+  </div>
+</div>
+
+<header>
+  <h1>トレーニングカルテ</h1>
+  <p>セッション記録・カルテ生成システム</p>
+</header>
+
+<!-- 基本情報 -->
+<div class="card">
+  <h2>基本情報</h2>
+  <div class="g3">
+    <div class="fg">
+      <label>クライアント名</label>
+      <input type="text" id="clientName" list="clientList" placeholder="氏名を入力または選択" autocomplete="off">
+      <datalist id="clientList"></datalist>
+      <p class="hint">新規名前を入力すると自動登録されます</p>
+    </div>
+    <div class="fg">
+      <label>実施日付</label>
+      <input type="date" id="sessionDate">
+    </div>
+    <div class="fg">
+      <label>トータル回数</label>
+      <input type="number" id="totalSessions" min="1" value="1">
+      <p class="hint">自動算出（手動修正可）</p>
+    </div>
+  </div>
+</div>
+
+<!-- チェックメニュー -->
+<div class="card">
+  <h2>チェックメニュー</h2>
+  <div class="asrow">
+    <input type="text" id="checkSearch" list="checkDL" placeholder="テスト名を検索または新規入力..." autocomplete="off">
+    <datalist id="checkDL"></datalist>
+    <button class="btn bo" onclick="onAddCheck()">＋ 追加</button>
+  </div>
+  <div class="rp" id="checkRP">
+    <div class="rp-title">新規テストを登録: <span id="checkRN" style="font-style:italic;margin-left:3px"></span></div>
+    <p class="hint" style="margin-bottom:7px">評価項目を追加してください（例: 股関節屈曲、膝進展）</p>
+    <div class="ri-tags" id="checkRTags"></div>
+    <div class="ri-row">
+      <input type="text" id="checkRInput" placeholder="評価項目名..." autocomplete="off">
+      <button class="btn bo bsm" onclick="addCheckRI()">＋</button>
+    </div>
+    <div class="ra">
+      <button class="btn bs bsm" onclick="saveCheckAsset()">✔ 登録して追加</button>
+      <button class="btn bsm" style="border:1px solid var(--bd)" onclick="cancelCheckRP()">キャンセル</button>
+    </div>
+  </div>
+  <div id="checkRows"><div class="empty">テスト項目を追加してください</div></div>
+</div>
+
+<!-- 整体メニュー -->
+<div class="card">
+  <h2>整体メニュー</h2>
+  <div id="seitaiRows"><div class="empty">「実施内容を追加」で行を追加してください</div></div>
+  <div style="margin-top:9px">
+    <button class="btn bo" onclick="addSeitaiRow()">＋ 実施内容を追加</button>
+  </div>
+</div>
+
+<!-- トレーニングメニュー -->
+<div class="card">
+  <h2>トレーニングメニュー</h2>
+  <div class="asrow">
+    <input type="text" id="trainSearch" list="trainDL" placeholder="種目名を検索または新規入力..." autocomplete="off">
+    <datalist id="trainDL"></datalist>
+    <button class="btn bo" onclick="onAddTrain()">＋ 追加</button>
+  </div>
+  <div class="rp" id="trainRP">
+    <div class="rp-title">新規種目を登録: <span id="trainRN" style="font-style:italic;margin-left:3px"></span></div>
+    <p class="hint" style="margin-bottom:6px">入力形式を選択してください</p>
+    <div class="type-tgl">
+      <button class="tt on" id="ttS" onclick="setTT('structured')">構造化（kg / reps / sets）</button>
+      <button class="tt" id="ttF" onclick="setTT('free')">フリーテキスト</button>
+    </div>
+    <div class="ra">
+      <button class="btn bs bsm" onclick="saveTrainAsset()">✔ 登録して追加</button>
+      <button class="btn bsm" style="border:1px solid var(--bd)" onclick="cancelTrainRP()">キャンセル</button>
+    </div>
+  </div>
+  <div id="trainRows"><div class="empty">種目を追加してください</div></div>
+</div>
+
+<!-- セッション詳細（ブロック） -->
+<div class="card">
+  <h2>セッション詳細・所感</h2>
+  <div id="sessionBlocks"></div>
+  <div style="margin-top:9px">
+    <button class="btn bo" onclick="addSBlock()">＋ ブロックを追加</button>
+  </div>
+</div>
+
+<!-- 次回の目標 -->
+<div class="card">
+  <h2>次回の目標・課題</h2>
+  <textarea id="nextGoals" placeholder="次回セッションに向けた目標や課題を記入..."></textarea>
+</div>
+
+<div class="gen-sec">
+  <button class="btn-gen" onclick="generateKarte()">カルテを生成する</button>
+  <div style="margin-top:10px">
+    <button class="btn bo bsm" onclick="resetForm()">フォームをリセット</button>
+  </div>
+</div>
+
+<!-- 結果ブロック -->
+<div id="resultArea" class="ph">
+  <div class="card">
+    <div class="res-hd">
+      <h2 style="font-size:.95rem;color:var(--tx)">メニュー内容</h2>
+      <button class="btn bo bsm" id="copyMenuBtn" onclick="copyBlock('menuText','copyMenuBtn')">コピー</button>
+    </div>
+    <div class="result-text" id="menuText"></div>
+  </div>
+  <div class="card">
+    <div class="res-hd">
+      <h2 style="font-size:.95rem;color:var(--tx)">セッション詳細・目標</h2>
+      <button class="btn bo bsm" id="copySessionBtn" onclick="copyBlock('sessionText','copySessionBtn')">コピー</button>
+    </div>
+    <div class="result-text" id="sessionText"></div>
+  </div>
+</div>
+
+<hr class="div">
+
+<!-- 蓄積カルテ -->
+<div class="card">
+  <h2>蓄積カルテ一覧</h2>
+  <div class="exp">
+    <button class="btn bs" onclick="exportAll()">全カルテ一括エクスポート (NotebookLM用)</button>
+    <button class="btn bo" onclick="exportClient()">クライアント別エクスポート</button>
+  </div>
+  <div id="recordsList"><div class="empty">まだカルテが生成されていません</div></div>
+</div>
+
+<!-- エラーモーダル -->
+<div class="err-overlay" id="errOverlay" onclick="closeErr(event)">
+  <div class="err-box">
+    <h3>未入力の項目があります</h3>
+    <ul class="err-list" id="errList"></ul>
+    <button class="btn bp" style="width:100%" onclick="closeErrBtn()">閉じて入力する</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+// ─── PIN認証 ───────────────────────────────────────────────
+// ★ PINを変更する場合はこの値を書き換えてください
+const APP_PIN      = '8239';
+const AUTH_KEY     = 'karte_auth_v1';
+const AUTH_DAYS    = 7;
+
+(function initAuth(){
+  const raw = localStorage.getItem(AUTH_KEY);
+  if(raw){
+    try{
+      const { ts } = JSON.parse(raw);
+      if((Date.now() - ts) / 86400000 < AUTH_DAYS){
+        document.getElementById('pinScreen').style.display = 'none';
+        return;
+      }
+    } catch {}
+  }
+  // 認証が必要 → PIN画面を表示したままにする
+  const input = document.getElementById('pinInput');
+  input.addEventListener('input', ()=>{
+    document.getElementById('pinError').style.display = 'none';
+    if(input.value.length === 4) verifyPin();
+  });
+  input.focus();
+})();
+
+function verifyPin(){
+  const input = document.getElementById('pinInput');
+  if(input.value === APP_PIN){
+    localStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() }));
+    document.getElementById('pinScreen').style.display = 'none';
+  } else {
+    document.getElementById('pinError').style.display = 'block';
+    input.value = '';
+    input.focus();
+  }
+}
+// ────────────────────────────────────────────────────────────
+
+const SK = 'training_karte_v2';
+
+function loadStore() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SK) || 'null');
+    if (!s) return ns();
+    if (!s.clients)        s.clients = {};
+    if (!s.checkAssets)    s.checkAssets = [];
+    if (!s.trainAssets)    s.trainAssets = [];
+    if (!s.records)        s.records = [];
+    return s;
+  } catch { return ns(); }
+}
+function ns() { return { clients:{}, checkAssets:[], trainAssets:[], records:[] }; }
+function save() {
+  try { localStorage.setItem(SK, JSON.stringify(store)); }
+  catch { toast('⚠ 保存領域が不足しています'); }
+}
+// migrate v1
+function migrate() {
+  try {
+    const v1 = JSON.parse(localStorage.getItem('training_karte_v1') || 'null');
+    if (!v1) return;
+    if (v1.clients)  Object.assign(store.clients, v1.clients);
+    if (v1.records)  v1.records.forEach(r => { if (!store.records.find(x=>x.id===r.id)) store.records.push(r); });
+    if (v1.checkAssets) v1.checkAssets.forEach(a => {
+      const n = typeof a==='string'?a:a.name;
+      if (!store.checkAssets.find(x=>x.name===n)) store.checkAssets.push({ name:n, items:typeof a==='object'?a.items||[]:[] });
+    });
+    if (v1.trainingAssets) v1.trainingAssets.forEach(a => {
+      const n = typeof a==='string'?a:a.name;
+      if (!store.trainAssets.find(x=>x.name===n)) store.trainAssets.push({ name:n, type:typeof a==='object'?a.type||'free':'free' });
+    });
+    save();
+  } catch {}
+}
+
+let store = loadStore();
+migrate();
+
+// runtime state
+let CRL=[], SRL=[], TRL=[], SBL=[];
+let cRItems=[], tRType='structured';
+let curMd=null, curFn=null;
+
+// ─── INIT ───
+function init() {
+  document.getElementById('sessionDate').value = today();
+  refreshCDL(); refreshADL(); renderRecs();
+
+  document.getElementById('clientName').addEventListener('change', e=>applyClient(e.target.value.trim()));
+  document.getElementById('clientName').addEventListener('input',  e=>{ if(store.clients[e.target.value.trim()]) applyClient(e.target.value.trim()); });
+  document.getElementById('checkSearch').addEventListener('keydown', e=>{ if(e.key==='Enter'){e.preventDefault();onAddCheck();} });
+  document.getElementById('trainSearch').addEventListener('keydown', e=>{ if(e.key==='Enter'){e.preventDefault();onAddTrain();} });
+  document.getElementById('checkRInput').addEventListener('keydown', e=>{ if(e.key==='Enter'){e.preventDefault();addCheckRI();} });
+
+  addSBlock();
+  checkReminder();
+}
+
+function today() {
+  const d=new Date();
+  return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}`;
+}
+function p2(n){ return String(n).padStart(2,'0'); }
+function df(s){ return s.replace(/-/g,''); }
+
+// ─── CLIENT ───
+function refreshCDL() {
+  const dl=document.getElementById('clientList');
+  dl.innerHTML='';
+  Object.keys(store.clients).sort().forEach(n=>{ const o=document.createElement('option');o.value=n;dl.appendChild(o); });
+}
+function applyClient(n) {
+  const c=store.clients[n];
+  document.getElementById('totalSessions').value = c ? c.sessions+1 : 1;
+}
+
+// ─── ASSET DATALISTS ───
+function refreshADL() {
+  const cd=document.getElementById('checkDL');
+  cd.innerHTML='';
+  store.checkAssets.forEach(a=>{ const o=document.createElement('option');o.value=a.name;cd.appendChild(o); });
+
+  const td=document.getElementById('trainDL');
+  td.innerHTML='';
+  store.trainAssets.forEach(a=>{ const o=document.createElement('option');o.value=a.name;td.appendChild(o); });
+}
+
+// ─── CHECK MENU ───
+function onAddCheck() {
+  const el=document.getElementById('checkSearch');
+  const name=el.value.trim();
+  if(!name){ toast('テスト名を入力してください'); return; }
+  if(CRL.find(r=>r.key===name)){ toast('同じテストが既に追加されています'); return; }
+  const ex=store.checkAssets.find(a=>a.name===name);
+  if(ex){ addCBlock(name,ex.items,false); el.value=''; return; }
+  cRItems=[];
+  document.getElementById('checkRN').textContent=name;
+  renderCRTags();
+  document.getElementById('checkRP').classList.add('open');
+  document.getElementById('checkRInput').focus();
+}
+function addCheckRI() {
+  const el=document.getElementById('checkRInput');
+  const v=el.value.trim(); if(!v) return;
+  if(cRItems.includes(v)){ toast('同じ項目が既にあります'); return; }
+  cRItems.push(v); renderCRTags(); el.value=''; el.focus();
+}
+function removeCheckRI(i){ cRItems.splice(i,1); renderCRTags(); }
+function renderCRTags() {
+  document.getElementById('checkRTags').innerHTML=
+    cRItems.map((t,i)=>`<span class="rtag">${eh(t)}<button onclick="removeCheckRI(${i})">✕</button></span>`).join('');
+}
+function saveCheckAsset() {
+  const name=document.getElementById('checkRN').textContent.trim();
+  if(!name) return;
+  if(!cRItems.length){ toast('評価項目を1つ以上追加してください'); return; }
+  store.checkAssets.push({ name, items:[...cRItems] });
+  save(); refreshADL();
+  document.getElementById('checkRP').classList.remove('open');
+  document.getElementById('checkSearch').value='';
+  addCBlock(name,cRItems,true);
+  cRItems=[];
+}
+function cancelCheckRP() {
+  document.getElementById('checkRP').classList.remove('open');
+  document.getElementById('checkSearch').value='';
+  cRItems=[];
+}
+function addCBlock(name,items,isNew) {
+  clrEmpty('checkRows');
+  const rid='cr_'+Date.now();
+  CRL.push({ key:name, rowId:rid, items:[...items] });
+  const b=document.createElement('div');
+  b.className='cb'; b.id=rid;
+
+  let body='';
+  if(items.length) {
+    body=items.map((item,i)=>`
+      <div class="sub-row">
+        <span class="slabel" title="${eh(item)}">${eh(item)}</span>
+        <select class="pn-sel" id="c_${rid}_${i}">
+          <option value="">--</option><option>陽性</option><option>陰性</option>
+        </select>
+      </div>`).join('');
+  } else {
+    body=`<div style="padding:0 6px 4px"><input type="text" id="v_${rid}" placeholder="評価内容を入力..."></div>`;
+  }
+  body+=`<div class="cb-note">
+    <input type="text" id="note_${rid}" placeholder="補足コメント（例: 右側のみ陽性）">
+  </div>`;
+  b.innerHTML=`<div class="cb-hd">
+    <div style="display:flex;align-items:center;gap:6px">
+      <span class="ktag">${eh(name)}</span>${isNew?'<span class="nbadge">NEW</span>':''}
+    </div>
+    <button class="btn bd2" onclick="rmCBlock('${rid}')">✕ 削除</button>
+  </div>${body}`;
+  document.getElementById('checkRows').appendChild(b);
+}
+function rmCBlock(rid) {
+  document.getElementById(rid)?.remove();
+  CRL=CRL.filter(r=>r.rowId!==rid);
+  if(!CRL.length) rstEmpty('checkRows','テスト項目を追加してください');
+}
+
+// ─── SEITAI ───
+function addSeitaiRow() {
+  clrEmpty('seitaiRows');
+  const rid='sr_'+Date.now(); SRL.push(rid);
+  const d=document.createElement('div');
+  d.className='sr'; d.id=rid;
+  d.innerHTML=`<input type="text" id="v_${rid}" placeholder="例: 大臀筋・梨状筋のリリース">
+    <button class="btn bd2" onclick="rmSRow('${rid}')">✕</button>`;
+  document.getElementById('seitaiRows').appendChild(d);
+  document.getElementById('v_'+rid).focus();
+}
+function rmSRow(rid) {
+  document.getElementById(rid)?.remove();
+  SRL=SRL.filter(i=>i!==rid);
+  if(!SRL.length) rstEmpty('seitaiRows','「実施内容を追加」で行を追加してください');
+}
+
+// ─── TRAINING ───
+function setTT(type) {
+  tRType=type;
+  document.getElementById('ttS').classList.toggle('on',type==='structured');
+  document.getElementById('ttF').classList.toggle('on',type==='free');
+}
+function onAddTrain() {
+  const el=document.getElementById('trainSearch');
+  const name=el.value.trim();
+  if(!name){ toast('種目名を入力してください'); return; }
+  if(TRL.find(r=>r.key===name)){ toast('同じ種目が既に追加されています'); return; }
+  const ex=store.trainAssets.find(a=>a.name===name);
+  if(ex){ addTBlock(name,ex.type,false); el.value=''; return; }
+  tRType='structured'; setTT('structured');
+  document.getElementById('trainRN').textContent=name;
+  document.getElementById('trainRP').classList.add('open');
+}
+function saveTrainAsset() {
+  const name=document.getElementById('trainRN').textContent.trim();
+  if(!name) return;
+  store.trainAssets.push({ name, type:tRType });
+  save(); refreshADL();
+  document.getElementById('trainRP').classList.remove('open');
+  document.getElementById('trainSearch').value='';
+  addTBlock(name,tRType,true);
+}
+function cancelTrainRP() {
+  document.getElementById('trainRP').classList.remove('open');
+  document.getElementById('trainSearch').value='';
+}
+function addTBlock(name,type,isNew) {
+  clrEmpty('trainRows');
+  const rid='tr_'+Date.now();
+  TRL.push({ key:name, rowId:rid, type, setIds:[] });
+  const b=document.createElement('div');
+  b.className='tb2'; b.id=rid;
+  const body=type==='structured'
+    ?`<div id="sets_${rid}"></div><div style="padding-left:6px;margin-top:3px"><button class="btn bo bsm" onclick="addSetRow('${rid}')">＋ セット追加</button></div>`
+    :`<div style="padding-left:6px"><input type="text" id="v_${rid}" placeholder="例: 60秒 左右 3セット" style="margin-top:2px"></div>`;
+  b.innerHTML=`<div class="tb2-hd">
+    <div style="display:flex;align-items:center;gap:6px">
+      <span class="ktag">${eh(name)}</span>${isNew?'<span class="nbadge">NEW</span>':''}
+      <span class="ftag">${type==='structured'?'kg/reps/sets':'フリー'}</span>
+    </div>
+    <button class="btn bd2" onclick="rmTBlock('${rid}')">✕ 削除</button>
+  </div>${body}`;
+  document.getElementById('trainRows').appendChild(b);
+  if(type==='structured') addSetRow(rid);
+}
+function addSetRow(rid) {
+  const obj=TRL.find(r=>r.rowId===rid); if(!obj) return;
+  const sid='set_'+Date.now();
+  obj.setIds.push(sid);
+  const d=document.createElement('div');
+  d.className='set-row'; d.id=sid;
+  d.innerHTML=`<input type="number" id="${sid}_kg" placeholder="kg" min="0" step="0.5">
+    <span class="su">kg ×</span>
+    <input type="number" id="${sid}_rep" placeholder="reps" min="0">
+    <span class="su">reps ×</span>
+    <input type="number" id="${sid}_set" placeholder="sets" min="0">
+    <span class="su">sets</span>
+    <button class="btn bd2" style="margin-left:4px" onclick="rmSetRow('${rid}','${sid}')">✕</button>`;
+  document.getElementById('sets_'+rid).appendChild(d);
+  document.getElementById(sid+'_kg').focus();
+}
+function rmSetRow(rid,sid) {
+  document.getElementById(sid)?.remove();
+  const obj=TRL.find(r=>r.rowId===rid);
+  if(obj) obj.setIds=obj.setIds.filter(i=>i!==sid);
+}
+function rmTBlock(rid) {
+  document.getElementById(rid)?.remove();
+  TRL=TRL.filter(r=>r.rowId!==rid);
+  if(!TRL.length) rstEmpty('trainRows','種目を追加してください');
+}
+
+// ─── SESSION BLOCKS ───
+function addSBlock() {
+  const bid='sb_'+Date.now(); SBL.push(bid);
+  const el=document.getElementById('sessionBlocks');
+  const d=document.createElement('div');
+  d.className='sbl'; d.id=bid;
+  d.innerHTML=`<div class="sbl-hd">
+    <input type="text" id="${bid}_t" placeholder="ブロックタイトル（例: 肩周りの動き）">
+    <button class="btn bd2" onclick="rmSBlock('${bid}')">✕</button>
+  </div>
+  <textarea id="${bid}_c" placeholder="所感・詳細を入力..."></textarea>`;
+  el.appendChild(d);
+  document.getElementById(bid+'_t').focus();
+}
+function rmSBlock(bid) {
+  document.getElementById(bid)?.remove();
+  SBL=SBL.filter(i=>i!==bid);
+}
+
+// ─── GENERATE ───
+function generateKarte() {
+  const cname=document.getElementById('clientName').value.trim();
+  const date=document.getElementById('sessionDate').value;
+  const sess=parseInt(document.getElementById('totalSessions').value,10)||1;
+  const goals=document.getElementById('nextGoals').value.trim();
+  if(!cname){ toast('クライアント名を入力してください'); return; }
+  if(!date){ toast('日付を入力してください'); return; }
+
+  // --- バリデーション ---
+  const errs=[];
+  CRL.forEach(({key,rowId,items})=>{
+    if(items.length){
+      items.forEach((item,i)=>{
+        if(!document.getElementById(`c_${rowId}_${i}`)?.value)
+          errs.push(`チェック「${key}」→「${item}」の陽性/陰性を選択してください`);
+      });
+    } else {
+      if(!(document.getElementById('v_'+rowId)?.value||'').trim())
+        errs.push(`チェック「${key}」の評価内容を入力してください`);
+    }
+  });
+  SRL.forEach((id,idx)=>{
+    if(!(document.getElementById('v_'+id)?.value||'').trim())
+      errs.push(`整体メニュー ${idx+1}行目の内容を入力してください`);
+  });
+  TRL.forEach(({key,rowId,type,setIds})=>{
+    if(type==='structured'){
+      setIds.forEach((sid,idx)=>{
+        const kg=(document.getElementById(sid+'_kg')?.value||'').trim();
+        const rep=(document.getElementById(sid+'_rep')?.value||'').trim();
+        const set=(document.getElementById(sid+'_set')?.value||'').trim();
+        if(!kg&&!rep&&!set) errs.push(`トレーニング「${key}」セット${idx+1}に値を入力してください`);
+      });
+      if(!setIds.length) errs.push(`トレーニング「${key}」にセットを追加してください`);
+    } else {
+      if(!(document.getElementById('v_'+rowId)?.value||'').trim())
+        errs.push(`トレーニング「${key}」の内容を入力してください`);
+    }
+  });
+  SBL.forEach((bid,idx)=>{
+    if(!(document.getElementById(bid+'_c')?.value||'').trim())
+      errs.push(`セッション詳細 ブロック${idx+1}の内容を入力してください`);
+  });
+  if(errs.length){
+    const ul=document.getElementById('errList');
+    ul.innerHTML=errs.map(e=>`<li>${eh(e)}</li>`).join('');
+    document.getElementById('errOverlay').classList.add('open');
+    return;
+  }
+
+  // check_menu
+  const cm={};
+  CRL.forEach(({key,rowId,items})=>{
+    if(!items.length){
+      const v=(document.getElementById('v_'+rowId)?.value||'').trim();
+      if(v) cm[key]=v;
+    } else {
+      const tr={};
+      items.forEach((item,i)=>{
+        const v=document.getElementById(`c_${rowId}_${i}`)?.value||'';
+        if(v) tr[item]=v;
+      });
+      const note=(document.getElementById('note_'+rowId)?.value||'').trim();
+      if(note) tr['note']=note;
+      if(Object.keys(tr).length) cm[key]=tr;
+    }
+  });
+
+  // seitai_menu
+  const sm=[];
+  SRL.forEach(id=>{ const v=(document.getElementById('v_'+id)?.value||'').trim(); if(v) sm.push(v); });
+
+  // training_menu
+  const tm={};
+  TRL.forEach(({key,rowId,type,setIds})=>{
+    if(type==='structured'){
+      const parts=[];
+      setIds.forEach(sid=>{
+        const kg=(document.getElementById(sid+'_kg')?.value||'').trim();
+        const rep=(document.getElementById(sid+'_rep')?.value||'').trim();
+        const set=(document.getElementById(sid+'_set')?.value||'').trim();
+        const t=[];
+        if(kg) t.push(kg+'kg');
+        if(rep) t.push(rep+'reps');
+        if(set) t.push(set+'sets');
+        if(t.length) parts.push(t.join(' '));
+      });
+      if(parts.length) tm[key]=parts.join(' / ');
+    } else {
+      const v=(document.getElementById('v_'+rowId)?.value||'').trim();
+      if(v) tm[key]=v;
+    }
+  });
+
+  // session blocks
+  const blocks=[];
+  SBL.forEach(bid=>{
+    const t=(document.getElementById(bid+'_t')?.value||'').trim();
+    const c=(document.getElementById(bid+'_c')?.value||'').trim();
+    if(c) blocks.push({t,c});
+  });
+
+  const obj={client_name:cname,date,total_sessions:sess};
+  if(Object.keys(cm).length)  obj.check_menu=cm;
+  if(sm.length)                obj.seitai_menu=sm;
+  if(Object.keys(tm).length)  obj.training_menu=tm;
+
+  let md='---json\n'+JSON.stringify(obj,null,2)+'\n---\n';
+  if(goals) md+='\n# 次回の目標・課題\n'+goals+'\n';
+  if(blocks.length){
+    md+='\n# セッション詳細・所感\n';
+    blocks.forEach(({t,c})=>{ md += t ? `\n## ${t}\n${c}\n` : `\n${c}\n`; });
+  }
+
+  curMd=md; curFn=`${df(date)}_${cname}.md`;
+
+  // ── 人が読めるテキストを生成して結果エリアに表示 ──
+  document.getElementById('menuText').textContent    = buildMenuText(cm, sm, tm);
+  document.getElementById('sessionText').textContent = buildSessionText(blocks, goals);
+  // コピーボタンを初期状態に戻す
+  ['copyMenuBtn','copySessionBtn'].forEach(id=>{
+    const b=document.getElementById(id);
+    b.textContent='📋 コピー'; b.classList.remove('copy-ok');
+  });
+  const ra=document.getElementById('resultArea');
+  ra.classList.remove('ph');
+  ra.scrollIntoView({behavior:'smooth',block:'start'});
+
+  store.clients[cname]={sessions:sess,lastDate:date};
+  const recId=df(date)+'_'+cname;
+  store.records=store.records.filter(r=>r.id!==recId);
+  store.records.unshift({id:recId,clientName:cname,date,totalSessions:sess,content:md});
+  save(); refreshCDL(); renderRecs();
+  const lastExp=localStorage.getItem(REMIND_KEY);
+  const daysSince=lastExp ? Math.floor((Date.now()-new Date(lastExp).getTime())/86400000) : 999;
+  toast(daysSince>=REMIND_DAYS
+    ? '✅ 保存しました。今週のエクスポートもお忘れなく！'
+    : '✅ カルテを生成・保存しました');
+}
+
+// ─── HUMAN-READABLE TEXT BUILDERS ───
+function buildMenuText(cm, sm, tm) {
+  const lines=[];
+
+  if(Object.keys(cm).length){
+    lines.push('【チェックメニュー】');
+    Object.entries(cm).forEach(([testName, val])=>{
+      lines.push('■ '+testName);
+      if(typeof val==='string'){
+        lines.push('  '+val);
+      } else {
+        Object.entries(val).forEach(([k,v])=>{
+          if(k==='note') lines.push('  補足: '+v);
+          else lines.push('  '+k+': '+v);
+        });
+      }
+    });
+    lines.push('');
+  }
+
+  if(sm.length){
+    lines.push('【整体メニュー】');
+    sm.forEach(item=>lines.push('・'+item));
+    lines.push('');
+  }
+
+  if(Object.keys(tm).length){
+    lines.push('【トレーニングメニュー】');
+    Object.entries(tm).forEach(([name,val])=>{
+      lines.push('■ '+name);
+      lines.push('  '+val);
+    });
+    lines.push('');
+  }
+
+  return lines.join('\n').trimEnd();
+}
+
+function buildSessionText(blocks, goals) {
+  const lines=[];
+
+  if(blocks.length){
+    lines.push('【セッション詳細・所感】');
+    blocks.forEach(({t,c})=>{
+      if(t){ lines.push(''); lines.push('▼ '+t); }
+      else lines.push('');
+      lines.push(c);
+    });
+    lines.push('');
+  }
+
+  if(goals){
+    lines.push('【次回の目標・課題】');
+    lines.push(goals);
+  }
+
+  return lines.join('\n').trimEnd();
+}
+
+// ─── RESULT BLOCK COPY ───
+async function copyBlock(textElId, btnId){
+  const text=document.getElementById(textElId)?.textContent||'';
+  try{ await navigator.clipboard.writeText(text); }
+  catch{
+    const t=Object.assign(document.createElement('textarea'),{value:text});
+    t.style.cssText='position:fixed;opacity:0';
+    document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove();
+  }
+  const btn=document.getElementById(btnId);
+  btn.textContent='✅ コピーしました'; btn.classList.add('copy-ok');
+  setTimeout(()=>{ btn.textContent='📋 コピー'; btn.classList.remove('copy-ok'); },2000);
+}
+
+// ─── DOWNLOAD / COPY (internal, for records export) ───
+function dlCurrent(){ if(curMd) dl(curMd,curFn); }
+function copyCurrent(){ if(curMd) cp(curMd); }
+function dl(text,fn){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([text],{type:'text/markdown;charset=utf-8'}));
+  a.download=fn; a.click(); URL.revokeObjectURL(a.href);
+  toast('⬇ '+fn+' をダウンロードしました');
+}
+async function cp(text){
+  try{ await navigator.clipboard.writeText(text); }
+  catch{
+    const t=Object.assign(document.createElement('textarea'),{value:text});
+    t.style.cssText='position:fixed;opacity:0';
+    document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove();
+  }
+  toast('📋 クリップボードにコピーしました');
+}
+
+// ─── EXPORT ───
+function exportAll(){
+  if(!store.records.length){ toast('カルテがまだありません'); return; }
+  const lines=[`# トレーニングカルテ 全記録`,`> エクスポート日: ${today()}  `,`> 総記録数: ${store.records.length}件`,'','---',''];
+  store.records.forEach(r=>{ lines.push(r.content); lines.push('---'); lines.push(''); });
+  dl(lines.join('\n'),`karte_all_${df(today())}.md`);
+  recordExport();
+}
+function exportClient(){
+  const n=document.getElementById('clientName').value.trim();
+  if(!n){ toast('クライアント名を入力してください'); return; }
+  const rs=store.records.filter(r=>r.clientName===n);
+  if(!rs.length){ toast(n+' のカルテが見つかりません'); return; }
+  const lines=[`# ${n} カルテ記録`,`> エクスポート日: ${today()}  `,`> セッション数: ${rs.length}回`,'','---',''];
+  rs.forEach(r=>{ lines.push(r.content); lines.push('---'); lines.push(''); });
+  dl(lines.join('\n'),`karte_${n.replace(/\s+/g,'_')}_${df(today())}.md`);
+  recordExport();
+}
+
+// ─── RECORDS ───
+function renderRecs(){
+  const el=document.getElementById('recordsList');
+  if(!store.records.length){ el.innerHTML='<div class="empty">まだカルテが生成されていません</div>'; return; }
+  el.innerHTML='';
+  store.records.forEach(r=>{
+    const d=document.createElement('div'); d.className='ri';
+    d.innerHTML=`<div><strong>${eh(r.clientName)}</strong><div class="rm">${r.date} ／ 第${r.totalSessions}回</div></div>
+      <div class="rac">
+        <button class="btn bo bsm" onclick="reDL('${ea(r.id)}')">⬇</button>
+        <button class="btn bd2" onclick="delRec('${ea(r.id)}')">削除</button>
+      </div>`;
+    el.appendChild(d);
+  });
+}
+function reDL(id){ const r=store.records.find(x=>x.id===id); if(r) dl(r.content,r.id+'.md'); }
+function delRec(id){
+  if(!confirm('このカルテをブラウザから削除しますか？')) return;
+  store.records=store.records.filter(r=>r.id!==id); save(); renderRecs(); toast('削除しました');
+}
+
+// ─── EXPORT REMINDER ───
+const REMIND_KEY='karte_last_export';
+const REMIND_DAYS=7;
+
+function checkReminder(){
+  const bar=document.getElementById('remindBar');
+  const msg=document.getElementById('remindMsg');
+  const last=localStorage.getItem(REMIND_KEY);
+
+  if(!last){
+    // 一度もエクスポートしたことがない場合、カルテが溜まってきたら表示
+    if(store.records.length>=3){
+      msg.textContent='まだエクスポートが行われていません。データをバックアップしましょう。';
+      bar.classList.add('show');
+    }
+    return;
+  }
+
+  const diffDays=Math.floor((Date.now()-new Date(last).getTime())/(86400000));
+  if(diffDays>=REMIND_DAYS){
+    msg.textContent=`前回のエクスポートから ${diffDays} 日が経過しています。Google Drive等にバックアップしましょう。`;
+    bar.classList.add('show');
+  }
+}
+
+function recordExport(){
+  localStorage.setItem(REMIND_KEY, new Date().toISOString());
+  document.getElementById('remindBar').classList.remove('show');
+}
+
+function dismissReminder(){
+  document.getElementById('remindBar').classList.remove('show');
+}
+
+function doExportFromReminder(){
+  exportAll();
+}
+
+// ─── ERROR MODAL ───
+function closeErr(e){ if(e.target===document.getElementById('errOverlay')) document.getElementById('errOverlay').classList.remove('open'); }
+function closeErrBtn(){ document.getElementById('errOverlay').classList.remove('open'); }
+
+// ─── RESET ───
+function resetForm(){
+  if(!confirm('フォームをリセットしますか？')) return;
+  document.getElementById('clientName').value='';
+  document.getElementById('sessionDate').value=today();
+  document.getElementById('totalSessions').value='1';
+  document.getElementById('nextGoals').value='';
+  CRL=[];SRL=[];TRL=[];SBL=[];
+  rstEmpty('checkRows','テスト項目を追加してください');
+  rstEmpty('seitaiRows','「実施内容を追加」で行を追加してください');
+  rstEmpty('trainRows','種目を追加してください');
+  document.getElementById('sessionBlocks').innerHTML='';
+  document.getElementById('resultArea').classList.add('ph');
+  cancelCheckRP(); cancelTrainRP();
+  curMd=null; curFn=null;
+  addSBlock();
+  toast('リセットしました');
+}
+
+// ─── UTILS ───
+function clrEmpty(id){ const e=document.getElementById(id).querySelector('.empty'); if(e) e.remove(); }
+function rstEmpty(id,msg){ document.getElementById(id).innerHTML=`<div class="empty">${msg}</div>`; }
+function eh(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function ea(s){ return eh(s); }
+function toast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2600);
+}
+
+init();
+</script>
+</body>
+</html>
