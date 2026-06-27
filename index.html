@@ -61,6 +61,12 @@
     .asrow{display:flex;gap:7px;margin-bottom:10px}
     .asrow input{flex:1;margin-bottom:0}
 
+    /* preset bar */
+    .preset-bar{display:flex;align-items:center;gap:7px;margin-bottom:10px;
+      flex-wrap:wrap;background:#f8fafc;border:1px dashed var(--bd);
+      border-radius:9px;padding:9px 11px}
+    .preset-sel{width:auto;min-width:160px;flex:0 1 auto;padding:6px 9px;font-size:.85rem}
+
     /* registration panel */
     .rp{display:none;background:#f8fafc;border:1.5px solid var(--bd);
       border-radius:9px;padding:13px;margin-bottom:10px}
@@ -285,6 +291,25 @@
     <datalist id="trainDL"></datalist>
     <button class="btn bo" onclick="onAddTrain()">＋ 追加</button>
   </div>
+  <!-- プリセット -->
+  <div class="preset-bar">
+    <select id="presetSel" class="preset-sel">
+      <option value="">プリセットを選択...</option>
+    </select>
+    <button class="btn bp bsm" onclick="applyPreset()">⚡ 一括追加</button>
+    <button class="btn bd2" id="presetDelBtn" onclick="removePreset()" title="選択中のプリセットを削除">🗑</button>
+    <button class="btn bo bsm" onclick="openPresetSave()" style="margin-left:auto">＋ 現在の構成を保存</button>
+  </div>
+  <div class="rp" id="presetSaveRP">
+    <div class="rp-title">現在の種目構成をプリセットとして保存</div>
+    <div class="ri-row">
+      <input type="text" id="presetNameInput" placeholder="プリセット名（例: 下半身ベーシック）" autocomplete="off">
+    </div>
+    <div class="ra">
+      <button class="btn bs bsm" onclick="saveCurrentAsPreset()">✔ 保存</button>
+      <button class="btn bsm" style="border:1px solid var(--bd)" onclick="cancelPresetSave()">キャンセル</button>
+    </div>
+  </div>
   <div class="rp" id="trainRP">
     <div class="rp-title">新規種目を登録: <span id="trainRN" style="font-style:italic;margin-left:3px"></span></div>
     <p class="hint" style="margin-bottom:6px">入力形式を選択してください</p>
@@ -373,6 +398,12 @@ const AUTH_KEY     = 'karte_auth_v1';
 const AUTH_DAYS    = 7;
 
 (function initAuth(){
+  // プレビュー（localhost）ではPINをスキップして動作確認できるようにする
+  const h = location.hostname;
+  if(h === 'localhost' || h === '127.0.0.1' || h === '' || location.protocol === 'file:'){
+    document.getElementById('pinScreen').style.display = 'none';
+    return;
+  }
   const raw = localStorage.getItem(AUTH_KEY);
   if(raw){
     try{
@@ -395,7 +426,7 @@ const AUTH_DAYS    = 7;
 function verifyPin(){
   const input = document.getElementById('pinInput');
   if(input.value === APP_PIN){
-    localStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() }));
+    try { localStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() })); } catch {}
     document.getElementById('pinScreen').style.display = 'none';
   } else {
     document.getElementById('pinError').style.display = 'block';
@@ -414,11 +445,12 @@ function loadStore() {
     if (!s.clients)        s.clients = {};
     if (!s.checkAssets)    s.checkAssets = [];
     if (!s.trainAssets)    s.trainAssets = [];
+    if (!s.trainPresets)   s.trainPresets = [];
     if (!s.records)        s.records = [];
     return s;
   } catch { return ns(); }
 }
-function ns() { return { clients:{}, checkAssets:[], trainAssets:[], records:[] }; }
+function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[] }; }
 function save() {
   try { localStorage.setItem(SK, JSON.stringify(store)); }
   catch { toast('⚠ 保存領域が不足しています'); }
@@ -492,6 +524,66 @@ function refreshADL() {
   const td=document.getElementById('trainDL');
   td.innerHTML='';
   store.trainAssets.forEach(a=>{ const o=document.createElement('option');o.value=a.name;td.appendChild(o); });
+
+  refreshPresetDL();
+}
+
+// ─── TRAINING PRESETS ───
+function refreshPresetDL() {
+  const sel=document.getElementById('presetSel');
+  if(!sel) return;
+  const cur=sel.value;
+  sel.innerHTML='<option value="">プリセットを選択...</option>';
+  store.trainPresets.forEach(p=>{
+    const o=document.createElement('option');
+    o.value=p.name;
+    o.textContent=`${p.name}（${p.items.length}種目）`;
+    sel.appendChild(o);
+  });
+  if(store.trainPresets.find(p=>p.name===cur)) sel.value=cur;
+}
+function applyPreset() {
+  const name=document.getElementById('presetSel').value;
+  if(!name){ toast('プリセットを選択してください'); return; }
+  const p=store.trainPresets.find(x=>x.name===name);
+  if(!p){ toast('プリセットが見つかりません'); return; }
+  let added=0, skipped=0;
+  p.items.forEach(it=>{
+    if(TRL.find(r=>r.key===it.name)){ skipped++; return; }
+    addTBlock(it.name, it.type, false);
+    added++;
+  });
+  toast(skipped ? `${added}件追加（${skipped}件は重複でスキップ）` : `${added}件を一括追加しました`);
+}
+function openPresetSave() {
+  if(!TRL.length){ toast('保存する種目がありません'); return; }
+  const inp=document.getElementById('presetNameInput');
+  inp.value=document.getElementById('presetSel').value||'';
+  document.getElementById('presetSaveRP').classList.add('open');
+  inp.focus();
+}
+function cancelPresetSave() {
+  document.getElementById('presetSaveRP').classList.remove('open');
+  document.getElementById('presetNameInput').value='';
+}
+function saveCurrentAsPreset() {
+  if(!TRL.length){ toast('保存する種目がありません'); return; }
+  const name=document.getElementById('presetNameInput').value.trim();
+  if(!name){ toast('プリセット名を入力してください'); return; }
+  const items=TRL.map(r=>({ name:r.key, type:r.type }));
+  const ex=store.trainPresets.find(p=>p.name===name);
+  if(ex){ ex.items=items; } else { store.trainPresets.push({ name, items }); }
+  save(); refreshPresetDL();
+  document.getElementById('presetSel').value=name;
+  cancelPresetSave();
+  toast(`プリセット「${name}」を保存しました（${items.length}種目）${ex?' ※上書き':''}`);
+}
+function removePreset() {
+  const name=document.getElementById('presetSel').value;
+  if(!name){ toast('削除するプリセットを選択してください'); return; }
+  store.trainPresets=store.trainPresets.filter(p=>p.name!==name);
+  save(); refreshPresetDL();
+  toast(`プリセット「${name}」を削除しました`);
 }
 
 // ─── CHECK MENU ───

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>アイコン生成</title>
+<style>
+  body { font-family: sans-serif; padding: 40px; background: #f1f5f9; }
+  button { margin: 8px; padding: 12px 24px; font-size: 1rem; cursor: pointer;
+    background: #1d4ed8; color: white; border: none; border-radius: 8px; }
+  canvas { display: none; }
+  p { margin-bottom: 16px; color: #334155; }
+</style>
+</head>
+<body>
+<h2>PWAアイコン生成</h2>
+<p>下のボタンを押してアイコンをダウンロードし、GitHubにアップロードしてください。</p>
+<button onclick="download(192)">icon-192.png をダウンロード</button>
+<button onclick="download(512)">icon-512.png をダウンロード</button>
+<canvas id="c"></canvas>
+<script>
+function draw(size) {
+  const c = document.getElementById('c');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const r = size * 0.156;
+  // rounded rect background
+  ctx.beginPath();
+  ctx.moveTo(r, 0); ctx.lineTo(size - r, 0);
+  ctx.quadraticCurveTo(size, 0, size, r);
+  ctx.lineTo(size, size - r);
+  ctx.quadraticCurveTo(size, size, size - r, size);
+  ctx.lineTo(r, size); ctx.quadraticCurveTo(0, size, 0, size - r);
+  ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
+  ctx.closePath();
+  ctx.fillStyle = '#1d4ed8';
+  ctx.fill();
+  // lines
+  const lines = [
+    { y: 0.27, w: 0.53, h: 0.07, op: 0.9 },
+    { y: 0.41, w: 0.39, h: 0.055, op: 0.7 },
+    { y: 0.52, w: 0.47, h: 0.055, op: 0.7 },
+    { y: 0.63, w: 0.35, h: 0.055, op: 0.7 },
+    { y: 0.74, w: 0.43, h: 0.055, op: 0.5 }
+  ];
+  lines.forEach(l => {
+    ctx.globalAlpha = l.op;
+    ctx.fillStyle = 'white';
+    ctx.beginPath();
+    const x = size * 0.23, y = size * l.y, w = size * l.w, h = size * l.h, rr = h * 0.45;
+    ctx.moveTo(x + rr, y); ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h - rr); ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, y + rr); ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  return c;
+}
+function download(size) {
+  const c = draw(size);
+  const a = document.createElement('a');
+  a.download = 'icon-' + size + '.png';
+  a.href = c.toDataURL('image/png');
+  a.click();
+}
+</script>
+</body>
+</html>
