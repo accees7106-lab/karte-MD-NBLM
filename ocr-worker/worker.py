@@ -1,12 +1,12 @@
 """手書きノート読み取りワーカー（ノートPCで動かす）
 
-Supabase の karte_ocr_jobs から status=queued のジョブを取り出し、
+Vault リポジトリ（GitHub）の使い捨てブランチ karte-inbox から、status=queued のジョブ（jobs/<id>.json と写真）を取り出し、
 ログイン済みの Claude Code CLI（`claude -p`、サブスクの枠内）で写真を読み取って結果を書き戻す。
-API キーは使わない。
+API キーは使わない。Vault をローカルに clone する必要はない（GitHub の API で読み書きする）。
 
-学習：トレーナーが下書きを直して保存すると、その差分が karte_ocr_feedback に記録される。
+学習：トレーナーが下書きを直して保存すると、その差分が Vault の Karte/訂正ログ/ に残る。
 手が空いたときに「写真＋AI の読み取り＋直した結果」を見比べて読み癖を要約し、
-karte_ocr_memory に新しい版として追記する（上書きしない＝忘れない）。毎回の読み取りプロンプトに必ず入れる。
+Karte/読み癖/ に新しい版として追記する（上書きしない＝忘れない）。毎回の読み取りプロンプトに必ず入れる。
 
   python worker.py          常駐（POLL_SEC 秒ごとに確認）
   python worker.py --once   溜まっている分だけ処理して終了
@@ -14,6 +14,7 @@ karte_ocr_memory に新しい版として追記する（上書きしない＝忘
 設定は同じフォルダの .env（.env.example 参照）。依存は標準ライブラリのみ。
 """
 import argparse
+import base64
 import json
 import os
 import shutil
@@ -27,8 +28,14 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TABLE = "karte_ocr_jobs"
-BUCKET = "karte-ocr"
+DEFAULT_REPO = "accees7106-lab/obsidian-vault"
+JOBS_DIR = "jobs"
+DIR_FEEDBACK = "Karte/訂正ログ"     # 実際の置き場所は <年-月>/（Contents API は1フォルダ1000件までしか一覧できない）
+DIR_MEMORY = "Karte/読み癖"
+MEMORY_FILE = DIR_MEMORY + "/memory.json"
+SETTLE_SEC = 120            # 訂正ログがこれより新しいうちは学習に回さない（同時刻の書き込みを取りこぼさないため）
+LEARN_CHECK_SEC = 120       # 学習待ちを確認する間隔
+INBOX_IDLE_SEC = 600        # inbox ブランチを作り直すまでの無操作時間
 STALE_MINUTES = 15
 MAX_ATTEMPTS = 2
 CONSOLIDATE_BATCH = 10      # 1回の学習で見比べる訂正の数
@@ -108,7 +115,8 @@ PROMPT = """あなたはパーソナルジムのトレーナーの手書きノ�
   - warmup.preset にはプリセット名を入れる（下の一覧の綴りに合わせる。書かれていなければ null）。
   - warmup.changes には差分だけを入れる：
     - 入れ替え: {{"op":"replace","from":"元の種目","to":"新しい種目"}}
-    - 追加: {{"op":"add","name":"種目","after":"直前の種目 または null"}}
+    - 追加: {{"op":"add","name":"種目名だけ","after":"直前の種目 または null","value":"秒数・回数など（無ければ null）"}}
+      （例: 「プランク30秒」→ name は「プランク」、value は「30秒」。種目名に数値を混ぜない）
     - 削除: {{"op":"remove","name":"種目"}}
     - 回数や時間などの変更: {{"op":"modify","name":"種目","value":"書かれた内容"}}
   - プリセットの種目を全部書き出さないこと（展開はアプリ側で行う）。
@@ -164,82 +172,301 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-class Supabase:
-    def __init__(self, url, key):
-        self.url = url.rstrip("/")
-        self.key = key
+class Conflict(RuntimeError):
+    """同じブランチへの同時書き込みで GitHub が返す競合（409 / sha 不一致の 422）"""
 
-    def request(self, method, path, body=None, headers=None, raw=False):
-        h = {"apikey": self.key, "Authorization": f"Bearer {self.key}"}
+
+class GitHubStore:
+    """Vault リポジトリの Contents / Git Data API。ブラウザ側 api/_github.js・api/_store.js と同じ取り決め。"""
+
+    def __init__(self, token, vault, inbox, api="https://api.github.com", retry_sec=0.4):
+        self.token, self.api, self.retry_sec = token, api.rstrip("/"), retry_sec
+        self.vault, self.inbox = vault, inbox            # (repo, branch)
+        self._jobs_cache = {}                            # ファイルの sha → 読み込んだジョブ
+        self._fb_cache = {}                              # 訂正ログのファイル名 → 中身（書き換わらない）
+
+    # ─── 低レベル ───
+    def call(self, method, path, body=None, raw=False):
+        headers = {"Authorization": f"Bearer {self.token}", "User-Agent": "karte-ocr-worker",
+                   "Accept": "application/vnd.github.raw+json" if raw else "application/vnd.github+json",
+                   "X-GitHub-Api-Version": "2022-11-28"}
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
-            h["Content-Type"] = "application/json"
-        h.update(headers or {})
-        req = urllib.request.Request(self.url + path, data=data, headers=h, method=method)
-        with urllib.request.urlopen(req, timeout=60) as res:
-            content = res.read()
-        if raw:
-            return content
-        return json.loads(content) if content else None
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.api + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as res:
+                status, content = res.status, res.read()
+        except urllib.error.HTTPError as e:
+            status, content = e.code, e.read()
+        if raw and status == 200:
+            return status, content
+        try:
+            return status, (json.loads(content) if content else None)
+        except ValueError:
+            return status, content.decode("utf-8", "replace")
 
-    def table(self, query):
-        return f"/rest/v1/{TABLE}?{query}"
+    @staticmethod
+    def _enc(p):
+        return "/".join(urllib.parse.quote(x, safe="") for x in p.split("/"))
+
+    def _contents(self, loc, path):
+        return f"/repos/{loc[0]}/contents/{self._enc(path)}"
+
+    @staticmethod
+    def _conflict(status, data):
+        return status == 409 or (status == 422 and "sha" in json.dumps(data, ensure_ascii=False).lower())
+
+    def _check(self, status, data, what):
+        if status >= 300:
+            raise RuntimeError(f"GitHub: {what} に失敗しました（{status}）{str(data)[:200]}")
+
+    def get_file(self, loc, path):
+        """(sha, 中身 or None) / 無ければ None。1MB を超えるファイル（写真）は中身が付かない。"""
+        status, data = self.call("GET", f"{self._contents(loc, path)}?ref={urllib.parse.quote(loc[1], safe='')}")
+        if status == 404:
+            return None
+        self._check(status, data, f"{path} の読み取り")
+        if isinstance(data, list) or data.get("type") != "file":
+            raise RuntimeError(f"ファイルではありません: {path}")
+        body = base64.b64decode(data["content"]) if data.get("encoding") == "base64" else None
+        return data["sha"], body
+
+    def list_dir(self, loc, path):
+        status, data = self.call("GET", f"{self._contents(loc, path)}?ref={urllib.parse.quote(loc[1], safe='')}")
+        if status == 404:
+            return []
+        self._check(status, data, f"{path} の一覧取得")
+        return data if isinstance(data, list) else []
+
+    def put(self, loc, path, data, message, sha=None):
+        body = {"message": message, "branch": loc[1], "content": base64.b64encode(data).decode("ascii")}
+        if sha:
+            body["sha"] = sha
+        return self.call("PUT", self._contents(loc, path), body)
+
+    def write(self, loc, path, data, message):
+        """あれば上書き、無ければ作成。競合したら読み直してやり直す。"""
+        for i in range(6):
+            cur = self.get_file(loc, path)
+            status, res = self.put(loc, path, data, message, cur[0] if cur else None)
+            if status < 300:
+                return res["content"]["sha"]
+            if not self._conflict(status, res):
+                self._check(status, res, f"{path} の書き込み")
+            time.sleep(self.retry_sec * (i + 1))
+        raise Conflict(f"{path} の書き込みが競合しました")
+
+    def delete(self, loc, path, message):
+        for i in range(6):
+            cur = self.get_file(loc, path)
+            if not cur:
+                return False
+            status, res = self.call("DELETE", self._contents(loc, path),
+                                    {"message": message, "branch": loc[1], "sha": cur[0]})
+            if status < 300:
+                return True
+            if status == 404:
+                return False
+            if not self._conflict(status, res):
+                self._check(status, res, f"{path} の削除")
+            time.sleep(self.retry_sec * (i + 1))
+        raise Conflict(f"{path} の削除が競合しました")
+
+    def download(self, loc, path):
+        status, data = self.call("GET", f"{self._contents(loc, path)}?ref={urllib.parse.quote(loc[1], safe='')}", raw=True)
+        self._check(status, data, f"{path} のダウンロード")
+        return data
+
+    # ─── ジョブ（inbox ブランチ）───
+    def list_jobs(self):
+        entries = [e for e in self.list_dir(self.inbox, JOBS_DIR) if e.get("type") == "file" and e["name"].endswith(".json")]
+        seen, jobs = {}, []
+        for e in entries:
+            job = self._jobs_cache.get(e["sha"])
+            if job is None:
+                f = self.get_file(self.inbox, e["path"])
+                if not f or f[1] is None:
+                    continue
+                job = json.loads(f[1].decode("utf-8"))
+            seen[e["sha"]] = job
+            jobs.append(dict(job, _sha=e["sha"], _path=e["path"]))
+        self._jobs_cache = seen
+        return sorted(jobs, key=lambda j: j.get("created_at") or "")
+
+    @staticmethod
+    def _plain(job):
+        return {k: v for k, v in job.items() if not k.startswith("_")}
 
     def claim_next(self):
-        rows = self.request("GET", self.table("select=id&status=eq.queued&order=created_at.asc&limit=1"))
-        if not rows:
-            return None
-        # status=eq.queued を条件に更新し、取り合いになっても1台だけが取れるようにする
-        got = self.request(
-            "PATCH",
-            self.table(f"id=eq.{rows[0]['id']}&status=eq.queued"),
-            {"status": "processing", "started_at": now_iso()},
-            {"Prefer": "return=representation"},
-        )
-        return got[0] if got else None
+        """queued のうち一番古いものを processing にして返す。sha を条件に書くので、取り合いになっても1台だけが取れる。"""
+        for j in (j for j in self.list_jobs() if j.get("status") == "queued"):
+            new = dict(self._plain(j), status="processing", started_at=now_iso())
+            status, res = self.put(self.inbox, j["_path"], self._dump(new), f"karte-inbox: start {j['id']}", j["_sha"])
+            if status < 300:
+                return dict(new, _sha=res["content"]["sha"], _path=j["_path"])
+            if not self._conflict(status, res):
+                self._check(status, res, "ジョブの取得")
+        return None
+
+    @staticmethod
+    def _dump(obj):
+        return (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+    def update_job(self, job, fields):
+        """ジョブのファイルを読み直して fields を重ね、書き戻す。更新後のジョブを返す。"""
+        path = job.get("_path") or f"{JOBS_DIR}/{job['id']}.json"
+        for i in range(6):
+            cur = self.get_file(self.inbox, path)
+            if not cur or cur[1] is None:
+                raise RuntimeError(f"ジョブが見つかりません: {job['id']}")
+            new = dict(json.loads(cur[1].decode("utf-8")), **fields)
+            status, res = self.put(self.inbox, path, self._dump(new), f"karte-inbox: {job['id']} → {new.get('status')}", cur[0])
+            if status < 300:
+                return dict(new, _sha=res["content"]["sha"], _path=path)
+            if not self._conflict(status, res):
+                self._check(status, res, "ジョブの更新")
+            time.sleep(self.retry_sec * (i + 1))
+        raise Conflict(f"ジョブの更新が競合しました: {job['id']}")
 
     def release_stale(self):
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=STALE_MINUTES)).isoformat()
-        q = "status=eq.processing&started_at=lt." + urllib.parse.quote(cutoff)
-        rows = self.request("PATCH", self.table(q), {"status": "queued"}, {"Prefer": "return=representation"})
-        if rows:
-            log(f"途中で止まっていた {len(rows)} 件を読み取り待ちに戻しました")
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_MINUTES)
+        n = 0
+        for j in self.list_jobs():
+            started = parse_iso(j.get("started_at"))
+            if j.get("status") == "processing" and started and started < cutoff:
+                self.update_job(j, {"status": "queued"})
+                n += 1
+        if n:
+            log(f"途中で止まっていた {n} 件を読み取り待ちに戻しました")
 
-    def update(self, job_id, fields):
-        self.request("PATCH", self.table(f"id=eq.{job_id}"), fields, {"Prefer": "return=minimal"})
-
-    def latest_memory(self):
-        rows = self.request("GET", "/rest/v1/karte_ocr_memory?select=*&order=version.desc&limit=1")
-        return rows[0] if rows else None
-
-    def pending_feedback(self, limit):
-        return self.request(
-            "GET", f"/rest/v1/karte_ocr_feedback?select=*&consolidated=eq.false&order=created_at.asc&limit={limit}") or []
-
-    def recent_feedback(self, limit):
-        return self.request(
-            "GET", f"/rest/v1/karte_ocr_feedback?select=diffs&consolidated=eq.false&order=created_at.desc&limit={limit}") or []
-
-    def jobs_by_ids(self, ids):
-        if not ids:
-            return []
-        return self.request("GET", self.table("select=id,image_path,status&id=in.(" + ",".join(ids) + ")")) or []
+    def job_image(self, job):
+        return self.download(self.inbox, job["image_path"])
 
     def delete_job(self, job):
-        self.request("DELETE", self.table(f"id=eq.{job['id']}"), headers={"Prefer": "return=minimal"})
         if job.get("image_path"):
-            self.remove(job["image_path"])
+            self.delete(self.inbox, job["image_path"], f"karte-inbox: remove photo {job['id']}")
+        self.delete(self.inbox, job.get("_path") or f"{JOBS_DIR}/{job['id']}.json", f"karte-inbox: remove job {job['id']}")
 
-    def download(self, path):
-        return self.request("GET", f"/storage/v1/object/{BUCKET}/{path}", raw=True)
+    def reset_inbox_if_idle(self):
+        """ジョブが1件も無く、しばらく誰も書いていなければ、inbox ブランチを履歴ごと作り直す（写真の履歴を残さない）。"""
+        if self.inbox == self.vault or "inbox" not in self.inbox[1]:
+            return False  # 作り直しは使い捨てブランチだけ。Vault 本体は絶対に触らない
+        status, ref = self.call("GET", f"/repos/{self.inbox[0]}/git/ref/heads/{self._enc(self.inbox[1])}")
+        if status == 404:
+            return False
+        self._check(status, ref, "inbox ブランチの確認")
+        if self.list_dir(self.inbox, JOBS_DIR):
+            return False
+        status, c = self.call("GET", f"/repos/{self.inbox[0]}/git/commits/{ref['object']['sha']}")
+        self._check(status, c, "inbox ブランチの確認")
+        if not c.get("parents"):
+            return False  # もう作り直したばかり
+        last = parse_iso((c.get("committer") or {}).get("date"))
+        if not last or (datetime.now(timezone.utc) - last).total_seconds() < int(os.environ.get("INBOX_IDLE_SEC", INBOX_IDLE_SEC)):
+            return False
+        repo = self.inbox[0]
+        st, blob = self.call("POST", f"/repos/{repo}/git/blobs", {"content": INBOX_README, "encoding": "utf-8"})
+        self._check(st, blob, "inbox の作り直し")
+        st, tree = self.call("POST", f"/repos/{repo}/git/trees",
+                             {"tree": [{"path": "README.md", "mode": "100644", "type": "blob", "sha": blob["sha"]}]})
+        self._check(st, tree, "inbox の作り直し")
+        st, commit = self.call("POST", f"/repos/{repo}/git/commits",
+                               {"message": "karte-inbox: reset (履歴を作り直し)", "tree": tree["sha"], "parents": []})
+        self._check(st, commit, "inbox の作り直し")
+        st, r = self.call("PATCH", f"/repos/{repo}/git/refs/heads/{self._enc(self.inbox[1])}",
+                          {"sha": commit["sha"], "force": True})
+        self._check(st, r, "inbox の作り直し")
+        log("inbox ブランチを作り直しました（写真の履歴を破棄）")
+        return True
 
-    def remove(self, path):
-        try:
-            self.request("DELETE", f"/storage/v1/object/{BUCKET}/{path}", raw=True)
-        except urllib.error.HTTPError as e:
-            if e.code not in (400, 404):
-                raise
+    # ─── 訂正ログと読み癖（Vault の main）───
+    def latest_memory(self):
+        f = self.get_file(self.vault, MEMORY_FILE)
+        return json.loads(f[1].decode("utf-8")) if f and f[1] else None
+
+    @staticmethod
+    def feedback_path(name):
+        return f"{DIR_FEEDBACK}/{name[:4]}-{name[4:6]}/{name}"
+
+    def feedback_names(self, upto=""):
+        """upto（読み癖に取り込み済みの最後のファイル名）より後の訂正ログの名前。取り込み済みの月は見に行かない。"""
+        first = f"{upto[:4]}-{upto[4:6]}" if upto else ""
+        months = sorted(e["name"] for e in self.list_dir(self.vault, DIR_FEEDBACK) if e.get("type") == "dir" and e["name"] >= first)
+        names = [e["name"] for m in months for e in self.list_dir(self.vault, f"{DIR_FEEDBACK}/{m}")
+                 if e.get("type") == "file" and e["name"].endswith(".json") and e["name"] > upto]
+        return sorted(names)
+
+    def _feedback(self, name):
+        if name not in self._fb_cache:
+            f = self.get_file(self.vault, self.feedback_path(name))
+            self._fb_cache[name] = json.loads(f[1].decode("utf-8")) if f and f[1] else {}
+        return dict(self._fb_cache[name], _name=name)
+
+    def pending_names(self, memory):
+        return self.feedback_names((memory or {}).get("last_feedback") or "")
+
+    def pending_feedback(self, memory, limit):
+        """学習に回す訂正（古い順）。書かれたばかりのものは、同時刻の書き込みを取りこぼさないよう少し待つ。"""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=SETTLE_SEC)
+        names = [n for n in self.pending_names(memory) if name_time(n) and name_time(n) <= cutoff]
+        return [self._feedback(n) for n in names[:limit]]
+
+    def recent_feedback(self, memory, limit):
+        return [self._feedback(n) for n in self.pending_names(memory)[-limit:]]
+
+    def save_memory(self, memory):
+        v = memory["version"]
+        data = self._dump(memory)
+        self.write(self.vault, f"{DIR_MEMORY}/履歴/v{v:04d}.json", data, f"karte: 読み癖 v{v}（履歴）")
+        self.write(self.vault, MEMORY_FILE, data, f"karte: 読み癖 v{v}")
+        self.write(self.vault, f"{DIR_MEMORY}/読み癖.md", render_memory_md(memory).encode("utf-8"), f"karte: 読み癖 v{v}（Markdown）")
+
+
+INBOX_README = (
+    "# karte-inbox（使い捨て）\n\n"
+    "カルテの手書きノート読み取りで、写真と処理状態を一時的に置くブランチです。\n"
+    "完成したカルテ・訂正ログ・読み癖は main の Karte/ にあります。\n"
+    "履歴ごと作り直されるので、ここに大事なものを置かないでください。\n"
+)
+
+
+def parse_iso(v):
+    if not v:
+        return None
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def name_time(name):
+    """訂正ログのファイル名 20261008T001122Z_<jobId>_<n>.json から時刻を取り出す。"""
+    try:
+        return datetime.strptime(name.split("_", 1)[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def render_memory_md(m):
+    lines = [
+        "# 手書きノート読み取りの読み癖（自動生成）", "",
+        f"> v{m['version']} ／ 訂正 {m.get('feedback_count', 0)}件から学習 ／ 更新 {str(m.get('created_at', ''))[:10]}  ",
+        "> トレーナーの手書きノートを読み取る AI が、訂正から学んだ書き癖です。ノートの文章を扱う他の用途",
+        "> （返信文の作成、集計、別の読み取りなど）でも、同じ書き癖として参照できます。手で直さないでください。", "",
+        "## 対応表（書かれ方 → 正しい表記）", "",
+    ]
+    aliases = m.get("aliases") or []
+    if aliases:
+        lines += ["| 書かれ方 | 正しい表記 | 種類 |", "|---|---|---|"]
+        lines += [f"| {a['written']} | {a['correct']} | {a.get('kind', '')} |" for a in aliases]
+    else:
+        lines.append("（まだありません）")
+    lines += ["", "## 読み癖の規則", ""]
+    lines += [f"- {r}" for r in m.get("rules") or []] or ["（まだありません）"]
+    return "\n".join(lines) + "\n"
 
 
 def fmt_context(ctx):
@@ -414,14 +641,14 @@ def run_claude(image_path, ctx, workdir, taken_at=None, memory=None, recent=None
 
 def process(sb, job):
     attempts = (job.get("attempts") or 0) + 1
-    sb.update(job["id"], {"attempts": attempts})
+    job = sb.update_job(job, {"attempts": attempts})
     log(f"読み取り開始 {job['id']}（{job.get('filename') or '写真'}）")
     workdir = tempfile.mkdtemp(prefix="karte-ocr-")
     try:
         ext = os.path.splitext(job["image_path"])[1] or ".jpg"
         image = os.path.join(workdir, "page" + ext)
         with open(image, "wb") as f:
-            f.write(sb.download(job["image_path"]))
+            f.write(sb.job_image(job))
         last = None
         for _ in range(MAX_ATTEMPTS):
             try:
@@ -433,13 +660,13 @@ def process(sb, job):
         else:
             raise RuntimeError(f"読み取り結果の形式が不正です: {last}")
         # 写真はまだ消さない：訂正があれば学習に使う（訂正が無ければ取り込み後に api/feedback が消す）
-        sb.update(job["id"], {"status": "done", "result": result, "error": None, "processed_at": now_iso()})
+        sb.update_job(job, {"status": "done", "result": result, "error": None, "processed_at": now_iso()})
         log(f"完了 {job['id']}：{len(result['karte'])}件")
     except NotLoggedIn:
-        sb.update(job["id"], {"status": "queued", "attempts": attempts - 1})  # 写真の問題ではないので待ちに戻す
+        sb.update_job(job, {"status": "queued", "attempts": attempts - 1})  # 写真の問題ではないので待ちに戻す
         raise
     except Exception as e:  # noqa: BLE001 — ジョブ単位で記録して次へ進む
-        sb.update(job["id"], {"status": "error", "error": str(e)[:500], "processed_at": now_iso()})
+        sb.update_job(job, {"status": "error", "error": str(e)[:500], "processed_at": now_iso()})
         log(f"エラー {job['id']}：{e}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -448,8 +675,9 @@ def process(sb, job):
 def load_learning(sb):
     """読み取りプロンプトに入れる学習内容（最新版の読み癖＋まだまとめていない直近の訂正）。"""
     try:
-        return sb.latest_memory(), sb.recent_feedback(RECENT_FEEDBACK)
-    except urllib.error.HTTPError as e:
+        memory = sb.latest_memory()
+        return memory, sb.recent_feedback(memory, RECENT_FEEDBACK)
+    except (urllib.error.URLError, RuntimeError) as e:
         log(f"学習内容を読めませんでした（読み取りは続けます）：{e}")
         return None, []
 
@@ -527,22 +755,22 @@ def merge_memory(old, new):
 
 def consolidate(sb):
     """まだ学習に回っていない訂正を写真と見比べ、読み癖ノートの新しい版を作る。"""
-    pending = sb.pending_feedback(CONSOLIDATE_BATCH)
+    old = sb.latest_memory() or {"version": 0, "rules": [], "aliases": [], "feedback_count": 0}
+    pending = sb.pending_feedback(old, CONSOLIDATE_BATCH)
     if not pending:
         return False
-    old = sb.latest_memory() or {"version": 0, "rules": [], "aliases": [], "feedback_count": 0}
-    jobs = {j["id"]: j for j in sb.jobs_by_ids(sorted({f["job_id"] for f in pending}))}
+    jobs = {j["id"]: j for j in sb.list_jobs()}
     workdir = tempfile.mkdtemp(prefix="karte-learn-")
     try:
         cases = []
         for i, fb in enumerate(pending, 1):
-            job, image = jobs.get(fb["job_id"]), None
+            job, image = jobs.get(fb.get("job_id")), None
             if job and job.get("image_path"):
                 try:
                     image = os.path.join(workdir, f"case{i}" + (os.path.splitext(job["image_path"])[1] or ".jpg"))
                     with open(image, "wb") as f:
-                        f.write(sb.download(job["image_path"]))
-                except urllib.error.HTTPError:
+                        f.write(sb.job_image(job))
+                except (urllib.error.URLError, RuntimeError):
                     image = None
             cases.append(fmt_case(i, fb, image))
         prompt = CONSOLIDATE_PROMPT.format(
@@ -559,43 +787,53 @@ def consolidate(sb):
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     version = (old.get("version") or 0) + 1
-    sb.request("POST", "/rest/v1/karte_ocr_memory", {
-        "version": version, "rules": merged["rules"], "aliases": merged["aliases"],
-        "feedback_count": (old.get("feedback_count") or 0) + len(pending),
-    }, {"Prefer": "return=minimal"})
-    ids = ",".join(str(f["id"]) for f in pending)
-    sb.request("PATCH", f"/rest/v1/karte_ocr_feedback?id=in.({ids})",
-               {"consolidated": True, "consolidated_at": now_iso(), "memory_version": version},
-               {"Prefer": "return=minimal"})
+    upto = pending[-1]["_name"]
+    sb.save_memory({
+        "version": version, "created_at": now_iso(), "rules": merged["rules"], "aliases": merged["aliases"],
+        "feedback_count": (old.get("feedback_count") or 0) + len(pending), "last_feedback": upto,
+    })
     # 学習に使い終わった写真を消す（その写真の訂正がすべて学習済みのものだけ）
+    left = sb.feedback_names(upto)
     for job in jobs.values():
-        if job.get("status") != "feedback":
-            continue
-        left = sb.request("GET", f"/rest/v1/karte_ocr_feedback?select=id&job_id=eq.{job['id']}&consolidated=eq.false&limit=1")
-        if not left:
+        if job.get("status") == "feedback" and not any(job["id"] in n for n in left):
             sb.delete_job(job)
     log(f"学習完了：読み癖 v{version}（規則 {len(merged['rules'])} 件・対応表 {len(merged['aliases'])} 件）")
     return True
 
 
 def cleanup(sb):
-    """訂正の報告が来ないまま残った写真を期限で消す。"""
-    def older(days):
-        return urllib.parse.quote((datetime.now(timezone.utc) - timedelta(days=days)).isoformat())
-    stale = (sb.request("GET", sb.table(f"select=id,image_path,status&status=eq.imported&imported_at=lt.{older(IMPORTED_KEEP_DAYS)}")) or []) + \
-            (sb.request("GET", sb.table(f"select=id,image_path,status&status=eq.feedback&processed_at=lt.{older(FEEDBACK_KEEP_DAYS)}")) or [])
+    """訂正の報告が来ないまま残った写真を期限で消し、空になった inbox ブランチは履歴ごと作り直す。"""
+    now = datetime.now(timezone.utc)
+    stale = []
+    for j in sb.list_jobs():
+        if j.get("status") == "imported" and (parse_iso(j.get("imported_at")) or now) < now - timedelta(days=IMPORTED_KEEP_DAYS):
+            stale.append(j)
+        elif j.get("status") == "feedback" and (parse_iso(j.get("processed_at")) or now) < now - timedelta(days=FEEDBACK_KEEP_DAYS):
+            stale.append(j)
     for job in stale:
         sb.delete_job(job)
     if stale:
         log(f"期限切れの写真 {len(stale)} 件を削除しました")
+    sb.reset_inbox_if_idle()
+
+
+def make_store():
+    repo = os.environ.get("GITHUB_REPO") or DEFAULT_REPO
+    vault = (repo, os.environ.get("VAULT_BRANCH") or "main")
+    inbox = (os.environ.get("INBOX_REPO") or repo, os.environ.get("INBOX_BRANCH") or "karte-inbox")
+    return GitHubStore(os.environ["GITHUB_TOKEN"], vault, inbox,
+                       os.environ.get("GITHUB_API_URL") or "https://api.github.com",
+                       float(os.environ.get("KARTE_RETRY_SEC", "0.4")))
 
 
 def check_env():
     if os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit("ANTHROPIC_API_KEY が設定されています。API 課金になるため起動しません。環境変数から削除してください。")
-    for k in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
-        if not os.environ.get(k):
-            sys.exit(f"{k} が .env にありません（.env.example を参照）")
+    if not os.environ.get("GITHUB_TOKEN"):
+        sys.exit("GITHUB_TOKEN が .env にありません（.env.example を参照）")
+    sb = make_store()
+    if sb.inbox == sb.vault:
+        sys.exit("INBOX_BRANCH が Vault のブランチと同じです。使い捨てブランチ（例: karte-inbox）を指定してください。")
     if not shutil.which(claude_cmd()):
         sys.exit(f"{claude_cmd()} が見つかりません。Claude Code をインストールしてください。")
 
@@ -606,32 +844,38 @@ def main():
     args = ap.parse_args()
     load_env()
     check_env()
-    sb = Supabase(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+    sb = make_store()
     poll = int(os.environ.get("POLL_SEC", "30"))
-    learn_retry_at = 0
+    learn_retry_at = learn_check_at = 0
     log("ocr-worker 起動" + ("（--once）" if args.once else f"（{poll}秒ごとに確認）"))
     while True:
         try:
             sb.release_stale()
+            worked = False
             while True:
                 job = sb.claim_next()
                 if not job:
                     break
                 process(sb, job)
+                worked = True
             # 読み取り待ちが無いときに学習する（読み取りを優先）。失敗したら30分は再挑戦しない
-            while time.time() >= learn_retry_at and not sb.request("GET", sb.table("select=id&status=eq.queued&limit=1")):
-                try:
-                    if not consolidate(sb):
+            if worked or args.once or time.time() >= learn_check_at:
+                learn_check_at = time.time() + LEARN_CHECK_SEC
+                while time.time() >= learn_retry_at:
+                    try:
+                        if not consolidate(sb):
+                            break
+                    except (ValueError, RuntimeError, json.JSONDecodeError) as e:
+                        log(f"学習に失敗しました（訂正は残っているので30分後にやり直します）：{e}")
+                        learn_retry_at = time.time() + 1800
                         break
-                except (ValueError, RuntimeError, json.JSONDecodeError) as e:
-                    log(f"学習に失敗しました（訂正は残っているので30分後にやり直します）：{e}")
-                    learn_retry_at = time.time() + 1800
-                    break
-            cleanup(sb)
+                cleanup(sb)
         except NotLoggedIn as e:
             sys.exit(str(e))
         except urllib.error.URLError as e:
-            log(f"Supabase に接続できません：{e}")
+            log(f"GitHub に接続できません：{e}")
+        except RuntimeError as e:  # GitHub の一時的なエラーや書き込みの競合：次の巡回でやり直す
+            log(f"GitHub の処理に失敗しました（次の巡回でやり直します）：{e}")
         if args.once:
             log("処理待ちはありません。終了します")
             return

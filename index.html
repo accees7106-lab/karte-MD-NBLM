@@ -283,6 +283,12 @@
       <div id="memView" class="hint">まだありません</div>
     </div>
     <div class="fg">
+      <label>Vault への保存</label>
+      <div id="vaultView" class="hint"></div>
+      <button class="btn bo bsm" style="margin-top:6px" onclick="sendAllRecords()">⬆ これまでのカルテを Vault へ送る</button>
+      <p class="hint">保存すると自動で Vault（Karte/カルテ/顧客名/）に残ります。過去の分はここで一括して送れます。</p>
+    </div>
+    <div class="fg">
       <label>データ移行（別のURL・端末へ）</label>
       <div style="display:flex;gap:7px;flex-wrap:wrap">
         <button class="btn bo bsm" onclick="exportBackup()">⬇ 全データを書き出し</button>
@@ -526,10 +532,11 @@ function loadStore() {
     if (!s.drafts)         s.drafts = [];
     if (!s.importedJobs)   s.importedJobs = [];
     if (!s.pendingFeedback) s.pendingFeedback = [];
+    if (!s.pendingRecords)  s.pendingRecords = [];
     return s;
   } catch { return ns(); }
 }
-function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[], drafts:[], importedJobs:[], pendingFeedback:[] }; }
+function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[], drafts:[], importedJobs:[], pendingFeedback:[], pendingRecords:[] }; }
 function save() {
   try { localStorage.setItem(SK, JSON.stringify(store)); }
   catch { toast('⚠ 保存領域が不足しています'); }
@@ -579,7 +586,7 @@ function init() {
   addSBlock();
   checkReminder();
   initSortables();
-  loadCfg(); renderDrafts(); renderJobs(); renderMemory();
+  loadCfg(); renderDrafts(); renderJobs(); renderMemory(); renderVault();
   if(cfg.token) syncJobs(false);
 }
 
@@ -1014,13 +1021,16 @@ function generateKarte() {
 
   store.clients[cname]=Object.assign({}, store.clients[cname], {sessions:sess,lastDate:date});
   if(curWuPreset) store.clients[cname].wuPreset=curWuPreset;
+  curWuPreset=null;  // 次のカルテ（別の顧客かもしれない）に持ち越さない
   TRL.forEach(r=>{ if(!store.trainAssets.find(a=>a.name===r.key)) store.trainAssets.push({name:r.key,type:r.type}); });
   refreshADL();
   if(curDraftId){ queueFeedback(curDraftId, curSnap, snapForm()); finishDraft(curDraftId); flushFeedback(); }
   const recId=df(date)+'_'+cname;
   store.records=store.records.filter(r=>r.id!==recId);
   store.records.unshift({id:recId,clientName:cname,date,totalSessions:sess,content:md});
+  queueRecord({ id:recId, client_name:cname, date, content:md });
   save(); refreshCDL(); renderRecs();
+  flushRecords();
   const lastExp=localStorage.getItem(REMIND_KEY);
   const daysSince=lastExp ? Math.floor((Date.now()-new Date(lastExp).getTime())/86400000) : 999;
   toast(daysSince>=REMIND_DAYS
@@ -1157,7 +1167,7 @@ function renderRecs(){
 }
 function reDL(id){ const r=store.records.find(x=>x.id===id); if(r) dl(r.content,r.id+'.md'); }
 function delRec(id){
-  if(!confirm('このカルテをブラウザから削除しますか？')) return;
+  if(!confirm('このカルテをこの端末から削除しますか？（Vault に保存済みのファイルは残ります）')) return;
   store.records=store.records.filter(r=>r.id!==id); save(); renderRecs(); toast('削除しました');
 }
 
@@ -1321,7 +1331,7 @@ async function uploadPhotos(){
       st.innerHTML=`送信中… <b>${done+failed.length}</b> / ${files.length}`;
     }
   }
-  await Promise.all([worker(),worker()]);
+  await worker();  // 1枚ずつ（GitHub は同じブランチへの同時コミットが競合しやすい）
   btn.disabled=false; input.value='';
   toast(failed.length?`${done}枚送信・${failed.length}枚失敗`:`${done}枚を送信しました`);
   if(failed.length) alert('送信できなかった写真:\n'+failed.join('\n'));
@@ -1345,7 +1355,7 @@ async function syncJobs(manual){
     // 取り込んだ印を付ける（写真は訂正の学習が済むまでサーバーに残る）
     try{ await api('PATCH','?id='+encodeURIComponent(j.id),{ status:'imported' }); }catch{}
   }
-  flushFeedback();
+  flushFeedback(); flushRecords();
   loadMemory();
   ocrJobs=ocrJobs.filter(j=>j.status!=='done');
   renderJobs(); renderDrafts();
@@ -1373,6 +1383,7 @@ function renderJobs(errMsg){
   if(p) parts.push(`読み取り中 <b>${p}</b>件`);
   if(e.length) parts.push(`<span class="err">エラー ${e.length}件</span>`);
   if(q && !p) parts.push('<span class="warn">（ノートPCの読み取りが動いていれば数分で終わります）</span>');
+  if(store.pendingRecords.length) parts.push(`<span class="warn">Vault未送信のカルテ ${store.pendingRecords.length}件</span>`);
   if(store.lastOcrAt) parts.push(`最終読み取り ${fmtDT(store.lastOcrAt)}`);
   st.innerHTML=parts.join('　');
   document.getElementById('ocrJobs').innerHTML=e.map(j=>`<div class="ocr-row">
@@ -1632,6 +1643,48 @@ async function flushFeedback(){
   }catch{ /* 通信できないときは端末に残して次回送る */ }
   flushing=false;
 }
+// ─── 完成したカルテを Vault へ ───
+// 保存（カルテを生成）するたびに /api/records へ送り、Vault の Karte/カルテ/<顧客名>/ にファイルとして残す。
+// 通信できないときは端末に溜めて、次に開いたときに送る。
+function queueRecord(rec){
+  if(!cfg.token) return;
+  store.pendingRecords=store.pendingRecords.filter(r=>r.id!==rec.id);
+  store.pendingRecords.push(rec);
+  save();
+}
+const RECORD_PACE_MS=800;
+let flushingRec=false;
+async function flushRecords(){
+  if(flushingRec || !store.pendingRecords.length || !cfg.token) return 0;
+  flushingRec=true; let sent=0;
+  try{
+    while(store.pendingRecords.length){
+      await apiAt('records','POST','',store.pendingRecords[0]);
+      store.pendingRecords.shift(); sent++; save(); renderVault();
+      // GitHub は内容を作る操作が短時間に続くと制限をかけるので、まとめて送るときは間隔をあける
+      if(store.pendingRecords.length) await new Promise(r=>setTimeout(r,RECORD_PACE_MS));
+    }
+  }catch(e){ renderVault(e.message); }
+  flushingRec=false;
+  renderVault();
+  return sent;
+}
+async function sendAllRecords(){
+  if(!cfg.token){ toast('アクセストークンを入力してください'); return; }
+  if(!store.records.length){ toast('送るカルテがありません'); return; }
+  if(!confirm(`この端末のカルテ ${store.records.length}件を Vault に送ります（1件ずつ保存されます）。よろしいですか？`)) return;
+  store.records.forEach(r=>queueRecord({ id:r.id, client_name:r.clientName, date:r.date, content:r.content }));
+  const n=store.pendingRecords.length;
+  const sent=await flushRecords();
+  toast(store.pendingRecords.length?`⚠ ${sent}/${n}件を送信（残りは次回）`:`⬆ ${sent}件を Vault に送りました`);
+}
+function renderVault(errMsg){
+  renderJobs();
+  const el=document.getElementById('vaultView'); if(!el) return;
+  const n=store.pendingRecords.length;
+  el.innerHTML=(n?`未送信のカルテ <b>${n}件</b>`:'未送信のカルテはありません')+(errMsg?`　<span class="err">⚠ ${eh(errMsg)}</span>`:'');
+}
+
 async function loadMemory(){
   try{ store.ocrMemory=await apiAt('feedback','GET',''); save(); }catch{}
   renderMemory();

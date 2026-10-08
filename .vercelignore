@@ -1,5 +1,4 @@
 ocr-worker/
-supabase/
 test/
 node_modules/
 *.md

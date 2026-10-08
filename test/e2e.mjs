@@ -55,7 +55,14 @@ async function setup(ctxOpts = {}) {
       localStorage.setItem('karte_last_export', new Date().toISOString());
     }
   }, [JSON.stringify(SEED)]);
-  const api = { posts: [], deletes: [], patches: [], feedback: [], jobs: [DONE, QUEUED, ERRJOB] };
+  const api = { posts: [], deletes: [], patches: [], feedback: [], records: [], recordsFail: false, jobs: [DONE, QUEUED, ERRJOB] };
+  await ctx.route('**/api/records**', async route => {
+    const req = route.request();
+    assert.equal(req.headers()['authorization'], 'Bearer t');
+    if (api.recordsFail) return route.fulfill({ status: 503, json: { error: 'Vault への書き込みが競合しました' } });
+    api.records.push(req.postDataJSON());
+    return route.fulfill({ json: { path: 'Karte/カルテ/x/y.md' } });
+  });
   await ctx.route('**/api/feedback**', async route => {
     const req = route.request();
     assert.equal(req.headers()['authorization'], 'Bearer t');
@@ -159,6 +166,40 @@ async function step(name, fn) {
     assert.equal(s.drafts.length, 1);
     assert.deepEqual(s.clients['玉谷'], { sessions: 4, lastDate: '2026-10-06', wuPreset: 'WU-A' });
     assert.ok(s.trainAssets.find(a => a.name === 'ワイドスクワット'));
+  });
+
+  await step('保存したカルテを Vault へ送る（顧客名・日付・生成した Markdown そのまま）', async () => {
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingRecords.length === 0);
+    assert.equal(api.records.length, 1);
+    const r = api.records[0];
+    assert.deepEqual([r.id, r.client_name, r.date], ['20261006_玉谷', '玉谷', '2026-10-06']);
+    assert.match(r.content, /^---json\n/);
+    assert.match(r.content, /"RDL": "40kg 10reps 2sets \/ 47\.5kg 8reps 1sets"/);
+    assert.equal(r.content, (await store(page)).records[0].content);
+  });
+
+  await step('保存手順の途中で通信できなくても、カルテは端末に残り、次に送り直す', async () => {
+    api.recordsFail = true;
+    await page.evaluate(() => { document.getElementById('clientName').value = '出口'; document.getElementById('sessionDate').value = '2026-10-07'; });
+    await page.click('.btn-gen');
+    await page.waitForFunction(() => document.getElementById('toast').textContent.length > 0);
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingRecords.length === 1);
+    assert.equal(api.records.length, 1);
+    assert.match(await page.textContent('#ocrStatus'), /Vault未送信のカルテ 1件/);
+    api.recordsFail = false;
+    await page.evaluate(() => flushRecords());
+    assert.equal(api.records.length, 2);
+    assert.equal(api.records[1].id, '20261007_出口');
+    assert.equal((await store(page)).pendingRecords.length, 0);
+  });
+
+  await step('「これまでのカルテを Vault へ送る」で端末のカルテを一括送信', async () => {
+    api.records.length = 0;
+    await page.click('details.cfg summary');
+    await page.click('text=これまでのカルテを Vault へ送る');
+    await page.waitForFunction(() => document.getElementById('toast').textContent.includes('2件を Vault に送りました'));
+    assert.deepEqual(api.records.map(r => r.id).sort(), ['20261006_玉谷', '20261007_出口']);
+    assert.match(await page.textContent('#vaultView'), /未送信のカルテはありません/);
   });
 
   await step('保存時に AI の読み取りとの差分を学習用に送る', async () => {
