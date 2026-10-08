@@ -43,7 +43,8 @@ function start(opts = {}) {
       state.calls.push(`${req.method} ${path}`);
 
       if (path === '/__fail') { state.failPuts = body().n; return send(200, {}); }
-      if (path === '/__reset') { state.repos = {}; state.failPuts = 0; state.calls = []; (opts.seed || []).forEach(r => state.seed(r)); return send(200, {}); }
+      if (path === '/__readonly') { state.readOnly = !!body().on; return send(200, {}); }
+      if (path === '/__reset') { state.repos = {}; state.failPuts = 0; state.readOnly = false; state.calls = []; (opts.seed || []).forEach(r => state.seed(r)); return send(200, {}); }
       if (path === '/__tree' || path === '/__file' || path === '/__commits') {
         const b = branchOf(url.searchParams.get('repo'), url.searchParams.get('branch'));
         if (!b) return send(404, {});
@@ -55,6 +56,14 @@ function start(opts = {}) {
 
       if ((req.headers.authorization || '') !== `Bearer ${token}`) return send(401, { message: 'Bad credentials' });
       let m;
+
+      // リポジトリとブランチの確認（worker.py --check 用）
+      if ((m = path.match(/^\/repos\/([^/]+\/[^/]+)$/)) && req.method === 'GET') {
+        return state.repos[m[1]] ? send(200, { full_name: m[1], permissions: state.readOnly ? { push: false } : { push: true } }) : send(404, { message: 'Not Found' });
+      }
+      if ((m = path.match(/^\/repos\/([^/]+\/[^/]+)\/branches\/(.+)$/)) && req.method === 'GET') {
+        return branchOf(m[1], m[2]) ? send(200, { name: m[2] }) : send(404, { message: 'Branch not found' });
+      }
 
       // Contents API
       if ((m = path.match(/^\/repos\/([^/]+\/[^/]+)\/contents\/(.+)$/))) {
@@ -169,5 +178,5 @@ function start(opts = {}) {
 module.exports = { start };
 
 if (require.main === module) {
-  start({ seed: (process.env.FAKE_SEED || '').split(',').filter(Boolean) }).then(s => { console.log('PORT=' + s.port); });
+  start({ seed: (process.env.FAKE_SEED || '').split(',').filter(Boolean), token: process.env.FAKE_TOKEN || undefined }).then(s => { console.log('PORT=' + s.port); });
 }

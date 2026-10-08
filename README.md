@@ -89,18 +89,29 @@
 > 2. 新 URL で「⬆ 読み込み」を押して、書き出したファイルを選ぶ。
 
 ### 3. ノートPC（Windows）
-1. Python 3.10 以上と Claude Code を入れる。`claude` を一度起動して `/login` する（サブスクのアカウントで）。
-2. このリポジトリの `ocr-worker` フォルダを置く（clone でも可）。
-3. `ocr-worker/.env.example` を `.env` にコピーし、`GITHUB_TOKEN` を入れる。
-4. 動作確認：`python worker.py --once`（溜まっている分を処理して終了する）
-5. ログオン時に自動で起動させたい場合は、次を1回だけ実行する。ログは `ocr-worker.log`。
 
-   ```
-   powershell -ExecutionPolicy Bypass -File .\register_task.ps1
-   ```
+**セットアップ用のスクリプトで進める。** PowerShell を開き、`ocr-worker` フォルダで次を実行する（何度実行してもよい）。
 
-- 環境変数に `ANTHROPIC_API_KEY` があると API 課金になってしまうため、ワーカーは起動を拒否する。
+```
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+1. Python 3.10 以上があるか確認する（無ければ winget で入れるか尋ねる）。
+2. Claude Code が入っているか確認する（自動では入れない）。
+3. `ANTHROPIC_API_KEY` があっても、ワーカーのプロセスでだけ外す（API 課金にならない）。
+4. `.env` を作り、`GITHUB_TOKEN` を貼ってもらう（入力は画面に出ない。保存先はあなただけが読めるファイル）。
+5. `python worker.py --check` で、トークン・Vault への接続・`claude -p` の呼び出し（サブスクのログイン）を確認する。問題があれば理由を表示して止まる。
+6. `python worker.py --once` を1回動かす（すでに溜まっている写真があれば、このとき読み取る）。
+7. ログオン時に自動で起動するタスク `KarteOcrWorker` を登録するか尋ねる。ログは `ocr-worker.log`。
+
+- 前もって必要なのは、Claude Code にログインしておくこと（`claude` を起動して `/login`）と、GitHub のトークン（手順 1）だけ。
+- **今使っているカルテの画面は変更しない。** このスクリプトは、この PC でワーカーを動かす準備だけを行う。
+- 手で進める場合は、`.env.example` を `.env` にコピーして `GITHUB_TOKEN` を入れ、`python worker.py --check` → `python worker.py --once` の順に実行する。
+- オプション：`-SkipSmokeTest`（手順 6 を省く）、`-SkipTask`（手順 7 を省く）。
+- `.env` の値は、同じ名前の環境変数より優先される（他のツールが `GITHUB_TOKEN` を設定していても影響しない）。
+- 環境変数に `ANTHROPIC_API_KEY` があると API 課金になってしまうため、手で `python worker.py` を実行するときは、先にその変数を外す（タスクとして動かすときは自動で外れる）。
 - `CLAUDE_MODEL=opus` などでモデルを指定できる（空ならサブスクの既定）。
+- ⚠ スクリプトは、PowerShell 7 での構文確認と、偽の GitHub・偽の `claude` を使った動作確認までしかしていない。**実際の Windows PowerShell 5.1 での実行は未確認。**
 
 ### 注意
 - このリポジトリは公開（public）。Vault は非公開（private）。**顧客のデータは Vault 側にだけあり、このリポジトリには入らない。**

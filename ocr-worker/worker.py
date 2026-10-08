@@ -10,6 +10,7 @@ Karte/読み癖/ に新しい版として追記する（上書きしない＝忘
 
   python worker.py          常駐（POLL_SEC 秒ごとに確認）
   python worker.py --once   溜まっている分だけ処理して終了
+  python worker.py --check  環境の確認だけ（トークン・Vault への接続・Claude Code のログイン）。setup.ps1 から呼ばれる
 
 設定は同じフォルダの .env（.env.example 参照）。依存は標準ライブラリのみ。
 """
@@ -151,17 +152,22 @@ WUプリセット（種目の並び）:
 """
 
 
-def load_env():
-    path = os.path.join(HERE, ".env")
+def load_env(path=None):
+    """.env を読む。値のある行は、すでに設定されている環境変数より優先する
+    （他のツールが GITHUB_TOKEN などをユーザー環境変数に入れていても、このワーカーの設定が黙って無視されないように）。
+    値が空の行は何もしない（環境変数があればそれを使う）。"""
+    path = path or os.path.join(HERE, ".env")
     if not os.path.exists(path):
         return
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            if v:
+                os.environ[k] = v
 
 
 def log(msg):
@@ -604,7 +610,8 @@ class NotLoggedIn(RuntimeError):
 
 
 def claude_cmd():
-    return os.environ.get("CLAUDE_CMD") or ("claude.cmd" if os.name == "nt" else "claude")
+    # Windows では claude.exe（公式のインストーラ）か claude.cmd（npm）のどちらか。PATH から探す
+    return os.environ.get("CLAUDE_CMD") or shutil.which("claude") or ("claude.cmd" if os.name == "nt" else "claude")
 
 
 def call_claude(prompt, schema, workdir):
@@ -838,11 +845,80 @@ def check_env():
         sys.exit(f"{claude_cmd()} が見つかりません。Claude Code をインストールしてください。")
 
 
+CHECK_PROMPT = """これは動作確認です。写真はありません。karte に空の配列を入れた JSON だけを返してください。"""
+
+
+def self_check():
+    """環境の確認。1項目ずつ [OK]/[NG] を表示し、すべて OK なら True を返す。"""
+    ok = True
+
+    def line(good, msg):
+        nonlocal ok
+        ok = ok and good
+        print(("[OK] " if good else "[NG] ") + msg, flush=True)
+
+    api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    line(not api_key, "ANTHROPIC_API_KEY は未設定（サブスクの枠で動きます）" if not api_key else
+         "ANTHROPIC_API_KEY が設定されています。API 課金になるため使いません（環境変数から外してください）")
+
+    cmd = shutil.which(claude_cmd())
+    line(bool(cmd), f"Claude Code: {cmd}" if cmd else
+         "claude が見つかりません。Claude Code をインストールしてください（見つかる場所に PATH を通す）")
+
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        line(False, "GITHUB_TOKEN が .env にありません（.env.example を参照）")
+        return False
+    sb = make_store()
+    if sb.inbox == sb.vault:
+        line(False, "INBOX_BRANCH が Vault のブランチと同じです。使い捨てブランチ（例: karte-inbox）を指定してください")
+        return False
+    repo, branch = sb.vault
+    try:
+        status, data = sb.call("GET", f"/repos/{repo}")
+        if status == 200:
+            perms = (data or {}).get("permissions")
+            if perms is not None and not perms.get("push"):
+                line(False, f"GitHub: {repo} は読めますが、書き込み権限がありません（トークンの Contents を Read and write にしてください）")
+            else:
+                line(True, f"GitHub: {repo} に接続できました" + ("" if perms is not None else "（書き込み権限は確認できませんでした）"))
+        elif status in (401, 403):
+            line(False, f"GitHub: トークンが使えません（{status}）。期限切れ・権限不足・値の貼り間違いのいずれかです")
+        elif status == 404:
+            line(False, f"GitHub: {repo} が見えません。トークンの対象リポジトリに含まれていないか、リポジトリ名が違います")
+        else:
+            line(False, f"GitHub: 予期しない応答です（{status}）")
+        if status == 200:
+            st, _ = sb.call("GET", f"/repos/{repo}/branches/{sb._enc(branch)}")
+            line(st == 200, f"Vault のブランチ {branch}" + (" があります" if st == 200 else " が見つかりません（VAULT_BRANCH を確認）"))
+    except urllib.error.URLError as e:
+        line(False, f"GitHub に接続できません：{e}")
+    if not cmd or api_key:
+        return False
+    workdir = tempfile.mkdtemp(prefix="karte-check-")
+    try:
+        result = normalize_result(call_claude(CHECK_PROMPT, OUTPUT_SCHEMA, workdir))
+        line(result == {"karte": []}, "claude -p の呼び出し（サブスクのログインで動作）" if result == {"karte": []}
+             else f"claude -p の返答が想定と違います：{result}")
+    except NotLoggedIn as e:
+        line(False, str(e))
+    except subprocess.TimeoutExpired:
+        line(False, "claude -p が時間内に終わりませんでした（ログイン画面で止まっていないか確認）")
+    except (RuntimeError, ValueError, json.JSONDecodeError) as e:
+        line(False, f"claude -p の呼び出しに失敗：{e}")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="溜まっている分だけ処理して終了")
+    ap.add_argument("--check", action="store_true", help="環境の確認だけ行って終了")
     args = ap.parse_args()
     load_env()
+    if args.check:
+        sys.exit(0 if self_check() else 1)
     check_env()
     sb = make_store()
     poll = int(os.environ.get("POLL_SEC", "30"))

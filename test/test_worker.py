@@ -345,6 +345,78 @@ class VaultTest(VaultTestCase):
             self.assertFalse(sb.reset_inbox_if_idle())
         self.assertEqual(self.tree(), ["Karte/カルテ/玉谷/a.md"])
 
+    # ─── --check（環境の確認）───
+    def run_check(self, **env):
+        keys = ("GITHUB_TOKEN", "GITHUB_REPO", "VAULT_BRANCH", "INBOX_BRANCH", "INBOX_REPO", "GITHUB_API_URL", "ANTHROPIC_API_KEY")
+        saved = {k: os.environ.get(k) for k in keys}
+        try:
+            for k in keys:
+                os.environ.pop(k, None)
+            os.environ.update(GITHUB_TOKEN="tok", GITHUB_REPO=REPO, GITHUB_API_URL=self.sb.api, KARTE_RETRY_SEC="0")
+            os.environ.update(env)
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ok = worker.self_check()
+            return ok, buf.getvalue()
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_check_passes_when_everything_is_ready(self):
+        self.set_claude_output({"type": "result", "is_error": False, "structured_output": {"karte": []}})
+        ok, out = self.run_check()
+        self.assertTrue(ok, out)
+        self.assertNotIn("[NG]", out)
+        self.assertIn("GitHub: me/vault に接続できました", out)
+        self.assertIn("claude -p の呼び出し", out)
+
+    def test_check_explains_each_problem(self):
+        self.set_claude_output({"type": "result", "is_error": False, "structured_output": {"karte": []}})
+        ok, out = self.run_check(GITHUB_TOKEN="wrong")
+        self.assertFalse(ok)
+        self.assertIn("[NG] GitHub: トークンが使えません（401）", out)
+        ok, out = self.run_check(GITHUB_REPO="me/other")
+        self.assertIn("[NG] GitHub: me/other が見えません", out)
+        ok, out = self.run_check(VAULT_BRANCH="nope")
+        self.assertIn("[NG] Vault のブランチ nope が見つかりません", out)
+        fake("/__readonly", "POST", {"on": True})
+        ok, out = self.run_check()
+        self.assertIn("書き込み権限がありません", out)
+        ok, out = self.run_check(ANTHROPIC_API_KEY="x")
+        self.assertIn("[NG] ANTHROPIC_API_KEY が設定されています", out)
+        ok, out = self.run_check(INBOX_BRANCH="main")
+        self.assertIn("[NG] INBOX_BRANCH が Vault のブランチと同じです", out)
+        os.environ.pop("GITHUB_TOKEN", None)
+        ok, out = self.run_check(GITHUB_TOKEN="")
+        self.assertIn("[NG] GITHUB_TOKEN が .env にありません", out)
+
+    def test_check_reports_a_claude_that_is_not_logged_in(self):
+        self.set_claude_output({"type": "result", "is_error": True, "result": "Not logged in"})
+        ok, out = self.run_check()
+        self.assertFalse(ok)
+        self.assertIn("[NG] claude -p の呼び出しに失敗", out)
+
+    def test_dotenv_wins_over_a_stray_environment_variable(self):
+        path = os.path.join(self.tmp, ".env")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\ufeff# コメント（BOM 付きでも読める）\nGITHUB_TOKEN=from-dotenv\nCLAUDE_MODEL=\nPOLL_SEC=\"45\"\n")
+        saved = {k: os.environ.get(k) for k in ("GITHUB_TOKEN", "CLAUDE_MODEL", "POLL_SEC")}
+        try:
+            os.environ.update(GITHUB_TOKEN="from-another-tool", CLAUDE_MODEL="keep-me")
+            os.environ.pop("POLL_SEC", None)
+            worker.load_env(path)
+            self.assertEqual(os.environ["GITHUB_TOKEN"], "from-dotenv")      # .env が優先
+            self.assertEqual(os.environ["CLAUDE_MODEL"], "keep-me")          # 空の行は環境変数を消さない
+            self.assertEqual(os.environ["POLL_SEC"], "45")
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
     def test_check_env(self):
         env = dict(os.environ)
         try:
