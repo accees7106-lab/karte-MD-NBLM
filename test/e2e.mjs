@@ -35,7 +35,7 @@ const DONE = {
   result: { karte: [
     { client_name: '玉谷', client_confidence: 'high', date: '2026-10-06', condition: '腰に張り。睡眠5h',
       warmup: { preset: 'WU-A', changes: [{ op: 'replace', from: 'デッドバグ', to: 'バードドッグ' }, { op: 'add', name: 'プランク', after: 'ローリング', value: '30秒' }] },
-      training: [{ name: 'RDL', sets: [{ kg: 40, reps: 10, sets: 2 }, { kg: 45, reps: 8, sets: 1 }], text: null }, { name: 'ワイドスクワット', sets: [], text: '自重15回' }],
+      training: [{ name: 'RDL', sets: [{ kg: 40, reps: 10, sets: 2 }, { kg: 45, reps: 8, sets: 1 }], text: null }, { name: 'ワイドSQ', sets: [], text: '自重15回' }],
       notes: null, uncertain: ['RDL 2行目の重量がにじんでいる'] },
     { client_name: '出口', client_confidence: 'low', date: null, condition: null,
       warmup: { preset: null, changes: [] }, training: [], notes: 'ストレッチ中心', uncertain: [] },
@@ -55,13 +55,21 @@ async function setup(ctxOpts = {}) {
       localStorage.setItem('karte_last_export', new Date().toISOString());
     }
   }, [JSON.stringify(SEED)]);
-  const api = { posts: [], deletes: [], jobs: [DONE, QUEUED, ERRJOB] };
+  const api = { posts: [], deletes: [], patches: [], feedback: [], jobs: [DONE, QUEUED, ERRJOB] };
+  await ctx.route('**/api/feedback**', async route => {
+    const req = route.request();
+    assert.equal(req.headers()['authorization'], 'Bearer t');
+    if (req.method() === 'POST') { api.feedback.push(req.postDataJSON()); return route.fulfill({ json: { recorded: 1 } }); }
+    return route.fulfill({ json: { pending: 1, memory: { version: 2, feedback_count: 5, rules: ['「口」を「ロ」と読まない'],
+      aliases: [{ written: 'ワイドSQ', correct: 'ワイドスクワット', kind: 'exercise' }] } } });
+  });
   await ctx.route('**/api/jobs**', async route => {
     const req = route.request();
     assert.equal(req.headers()['authorization'], 'Bearer t');
     const m = req.method();
     if (m === 'GET') return route.fulfill({ json: { jobs: api.jobs } });
     if (m === 'POST') { api.posts.push(req.postDataJSON()); return route.fulfill({ json: { id: 'x', status: 'queued' } }); }
+    if (m === 'PATCH') { const id = new URL(req.url()).searchParams.get('id'); api.patches.push([id, req.postDataJSON().status]); if (req.postDataJSON().status === 'imported') api.jobs = api.jobs.filter(j => j.id !== id); return route.fulfill({ json: {} }); }
     if (m === 'DELETE') { const id = new URL(req.url()).searchParams.get('id'); api.deletes.push(id); api.jobs = api.jobs.filter(j => j.id !== id); return route.fulfill({ json: { deleted: 1 } }); }
     return route.fulfill({ json: {} });
   });
@@ -85,10 +93,15 @@ async function step(name, fn) {
 {
   const { ctx, page, api, errors } = await setup();
 
-  await step('起動時に結果を取り込み、完了ジョブは削除・状態を表示', async () => {
+  await step('起動時に結果を取り込み、完了ジョブに取り込み済みの印・状態と読み癖を表示', async () => {
     await page.waitForSelector('#draftList .ocr-row');
     assert.equal((await page.$$('#draftList .ocr-row')).length, 2);
-    assert.deepEqual(api.deletes, [DONE.id]);
+    assert.deepEqual(api.patches, [[DONE.id, 'imported']]);
+    assert.deepEqual(api.deletes, []);
+    await page.waitForFunction(() => document.getElementById('memView').textContent.includes('v2'));
+    const mv = await page.textContent('#memView');
+    assert.match(mv, /訂正 5件から学習（学習待ちの訂正 1件）/);
+    assert.match(mv, /ワイドSQ→ワイドスクワット/);
     const st = await page.textContent('#ocrStatus');
     assert.match(st, /読み取り待ち 1件/);
     assert.match(st, /エラー 1件/);
@@ -117,7 +130,7 @@ async function step(name, fn) {
     assert.equal(await page.inputValue('#sessionBlocks .sbl input'), '体調');
     const bar = await page.textContent('#draftBar');
     assert.match(bar, /RDL 2行目の重量がにじんでいる/);
-    assert.match(bar, /新しい種目（保存時に登録）：バードドッグ、プランク、ワイドスクワット/);
+    assert.match(bar, /新しい種目（保存時に登録）：バードドッグ、プランク、ワイドスクワット/); // 学習した対応表で「ワイドSQ」を直している
   });
 
   await step('マウスのドラッグで RDL を先頭へ移動できる', async () => {
@@ -133,17 +146,35 @@ async function step(name, fn) {
   });
 
   await step('生成すると並べ替えた順で保存され、下書きが1件減る・顧客情報は保持', async () => {
+    const rdl = page.locator('#trainRows .tb2').nth(0);
+    await rdl.locator('input').nth(3).fill('47.5'); // 2行目の重量を手で訂正
     await page.click('.btn-gen');
     await page.waitForSelector('#resultArea:not(.ph)');
     const s = await store(page);
     const md = s.records[0].content;
     const tm = JSON.parse(md.split('---json\n')[1].split('\n---')[0]).training_menu;
     assert.deepEqual(Object.keys(tm), ['RDL', 'チェストオープナー', 'バードドッグ', 'ローリング', 'プランク', 'ワイドスクワット']);
-    assert.equal(tm.RDL, '40kg 10reps 2sets / 45kg 8reps 1sets');
+    assert.equal(tm.RDL, '40kg 10reps 2sets / 47.5kg 8reps 1sets');
     assert.match(md, /## 体調\n腰に張り。睡眠5h/);
     assert.equal(s.drafts.length, 1);
     assert.deepEqual(s.clients['玉谷'], { sessions: 4, lastDate: '2026-10-06', wuPreset: 'WU-A' });
     assert.ok(s.trainAssets.find(a => a.name === 'ワイドスクワット'));
+  });
+
+  await step('保存時に AI の読み取りとの差分を学習用に送る', async () => {
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingFeedback.length === 0);
+    assert.equal(api.feedback.length, 1);
+    const f = api.feedback[0];
+    assert.equal(f.job_id, DONE.id);
+    assert.equal(f.draft_index, 0);
+    assert.equal(f.last, false); // 同じ写真の下書きがまだ残っている
+    assert.equal(f.draft.client_name, '玉谷');
+    assert.deepEqual(f.diffs.find(d => d.field === 'train_value'), { field: 'train_value', name: 'RDL', ai: '40kg 10reps 2sets / 45kg 8reps 1sets', final: '40kg 10reps 2sets / 47.5kg 8reps 1sets' });
+    const ord = f.diffs.find(d => d.field === 'train_order');
+    assert.equal(ord.ai[0], 'チェストオープナー');
+    assert.equal(ord.final[0], 'RDL');
+    assert.equal(f.diffs.length, 2);
+    assert.equal(f.final.training[0].name, 'RDL');
   });
 
   await step('プリセット名が無いページは顧客の「いつもの WU」を使う', async () => {
@@ -152,6 +183,14 @@ async function step(name, fn) {
     assert.deepEqual(await trainNames(page), ['チェストオープナー', 'ローリング']);
     assert.match(await page.textContent('#draftBar'), /いつもの「WU-B」を使いました/);
     assert.match(await page.textContent('#draftBar'), /顧客名の読み取りに自信がありません/);
+  });
+
+  await step('下書きを破棄すると、その写真が片付いたこと（last）だけを送る', async () => {
+    await page.click('#draftBar button');
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).drafts.length === 0);
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingFeedback.length === 0);
+    assert.equal(api.feedback.length, 2);
+    assert.deepEqual([api.feedback[1].job_id, api.feedback[1].last, api.feedback[1].diffs], [DONE.id, true, []]);
   });
 
   assert.deepEqual(errors, []);

@@ -279,6 +279,10 @@
     </div>
     <button class="btn bo bsm" onclick="saveCfg()">設定を保存</button>
     <div class="fg">
+      <label>学習した読み癖</label>
+      <div id="memView" class="hint">まだありません</div>
+    </div>
+    <div class="fg">
       <label>データ移行（別のURL・端末へ）</label>
       <div style="display:flex;gap:7px;flex-wrap:wrap">
         <button class="btn bo bsm" onclick="exportBackup()">⬇ 全データを書き出し</button>
@@ -521,10 +525,11 @@ function loadStore() {
     if (!s.records)        s.records = [];
     if (!s.drafts)         s.drafts = [];
     if (!s.importedJobs)   s.importedJobs = [];
+    if (!s.pendingFeedback) s.pendingFeedback = [];
     return s;
   } catch { return ns(); }
 }
-function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[], drafts:[], importedJobs:[] }; }
+function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[], drafts:[], importedJobs:[], pendingFeedback:[] }; }
 function save() {
   try { localStorage.setItem(SK, JSON.stringify(store)); }
   catch { toast('⚠ 保存領域が不足しています'); }
@@ -555,7 +560,7 @@ migrate();
 let CRL=[], SRL=[], TRL=[], SBL=[];
 let cRItems=[], tRType='structured';
 let curMd=null, curFn=null;
-let curDraftId=null, curWuPreset=null;
+let curDraftId=null, curWuPreset=null, curSnap=null;
 let _uid=0;
 function uid(pre){ return pre+Date.now().toString(36)+'_'+(++_uid); }
 const DH='<span class="dh" title="ドラッグで並べ替え">⠿</span>';
@@ -574,7 +579,7 @@ function init() {
   addSBlock();
   checkReminder();
   initSortables();
-  loadCfg(); renderDrafts(); renderJobs();
+  loadCfg(); renderDrafts(); renderJobs(); renderMemory();
   if(cfg.token) syncJobs(false);
 }
 
@@ -1011,7 +1016,7 @@ function generateKarte() {
   if(curWuPreset) store.clients[cname].wuPreset=curWuPreset;
   TRL.forEach(r=>{ if(!store.trainAssets.find(a=>a.name===r.key)) store.trainAssets.push({name:r.key,type:r.type}); });
   refreshADL();
-  if(curDraftId) finishDraft(curDraftId);
+  if(curDraftId){ queueFeedback(curDraftId, curSnap, snapForm()); finishDraft(curDraftId); flushFeedback(); }
   const recId=df(date)+'_'+cname;
   store.records=store.records.filter(r=>r.id!==recId);
   store.records.unshift({id:recId,clientName:cname,date,totalSessions:sess,content:md});
@@ -1205,7 +1210,7 @@ function resetForm(){
   toast('リセットしました');
 }
 function clearForm(){
-  curDraftId=null; curWuPreset=null; renderDraftBar(null);
+  curDraftId=null; curWuPreset=null; curSnap=null; renderDraftBar(null);
   document.getElementById('clientName').value='';
   document.getElementById('sessionDate').value=today();
   document.getElementById('totalSessions').value='1';
@@ -1249,9 +1254,10 @@ function saveCfg(){
   toast('設定を保存しました');
   if(cfg.token) syncJobs(false);
 }
-async function api(method, query, body){
+function api(method, query, body){ return apiAt('jobs', method, query, body); }
+async function apiAt(path, method, query, body){
   if(!cfg.token) throw new Error('設定でアクセストークンを入力してください');
-  const res=await fetch(`${cfg.api}/api/jobs${query||''}`,{
+  const res=await fetch(`${cfg.api}/api/${path}${query||''}`,{
     method,
     headers:Object.assign({ 'Authorization':'Bearer '+cfg.token }, body?{'Content-Type':'application/json'}:{}),
     body: body?JSON.stringify(body):undefined
@@ -1336,9 +1342,11 @@ async function syncJobs(manual){
       if(j.processed_at && (!store.lastOcrAt || j.processed_at>store.lastOcrAt)) store.lastOcrAt=j.processed_at;
       save();
     }
-    // 取り込んだら（下書きは端末に保存済み）サーバー側の行は消す
-    try{ await api('DELETE','?id='+encodeURIComponent(j.id)); }catch{}
+    // 取り込んだ印を付ける（写真は訂正の学習が済むまでサーバーに残る）
+    try{ await api('PATCH','?id='+encodeURIComponent(j.id),{ status:'imported' }); }catch{}
   }
+  flushFeedback();
+  loadMemory();
   ocrJobs=ocrJobs.filter(j=>j.status!=='done');
   renderJobs(); renderDrafts();
   if(added) toast(`📝 下書きを${added}件取り込みました`);
@@ -1449,7 +1457,7 @@ function applyDraft(d){
 
   // 顧客
   const names=Object.keys(store.clients);
-  const hit=k.client_name?findByName(names,k.client_name,x=>x):null;
+  const hit=k.client_name?(findByName(names,k.client_name,x=>x)||findByName(names,aliasOf('client',k.client_name),x=>x)):null;
   const cname=hit||k.client_name||'';
   document.getElementById('clientName').value=cname;
   applyClient(cname);
@@ -1462,7 +1470,7 @@ function applyDraft(d){
   const wu=k.warmup||{};
   const client=store.clients[cname];
   let pname=wu.preset||(client&&client.wuPreset)||null;
-  let preset=pname?findByName(store.trainPresets,pname):null;
+  let preset=pname?(findByName(store.trainPresets,pname)||findByName(store.trainPresets,aliasOf('preset',pname))):null;
   if(wu.preset && !preset) notes.push(`WUプリセット「${wu.preset}」が登録されていません`);
   if(!wu.preset && preset) notes.push(`WUプリセットの記載が無いため、いつもの「${preset.name}」を使いました`);
   if(preset){ pname=preset.name; curWuPreset=preset.name; }
@@ -1513,9 +1521,19 @@ function applyDraft(d){
 
   notes.push(...(k.uncertain||[]).map(u=>'読み取り：'+u));
   renderDraftBar(d,notes);
+  curSnap=snapForm();  // AI の読み取りをそのまま入れた状態（保存時にこれとの差分を学習に送る）
   document.activeElement && document.activeElement.blur && document.activeElement.blur();
 }
-function canonTrain(n){ const a=findByName(store.trainAssets,n); return a?a.name:String(n).trim(); }
+function canonTrain(n){
+  const a=findByName(store.trainAssets,n)||findByName(store.trainAssets,aliasOf('exercise',n));
+  return a?a.name:(aliasOf('exercise',n)||String(n).trim());
+}
+// 学習した対応表（書かれ方 → 正しい表記）。該当が無ければ null
+function aliasOf(kind,written){
+  const list=(store.ocrMemory&&store.ocrMemory.memory&&store.ocrMemory.memory.aliases)||[];
+  const a=list.find(x=>x.kind===kind && norm(x.written)===norm(written));
+  return a?a.correct:null;
+}
 
 function renderDraftBar(d,notes){
   const bar=document.getElementById('draftBar');
@@ -1534,12 +1552,100 @@ function finishDraft(id){
 function discardDraft(){
   if(!curDraftId) return;
   if(!confirm('この下書きを破棄しますか？（元に戻せません）')) return;
+  queueFeedback(curDraftId, null, null);
   finishDraft(curDraftId);
+  flushFeedback();
   clearForm(); addSBlock();
   toast('下書きを破棄しました');
 }
 function showNextDraftHint(){
   setTimeout(()=>toast(`📝 下書きが残り${store.drafts.length}件あります`),2800);
+}
+
+// ─── 訂正の学習 ───
+// 下書きを保存したとき「AI の読み取りを入れた直後の状態」と「保存した状態」の差分をサーバーへ送る。
+// ノートPCの ocr-worker が写真と見比べて読み癖を要約し、次の読み取りプロンプトに必ず入れる。
+function trainValue(r){
+  if(r.type==='structured'){
+    return r.setIds.map(sid=>{
+      const t=[], kg=(document.getElementById(sid+'_kg')?.value||'').trim(),
+        rep=(document.getElementById(sid+'_rep')?.value||'').trim(), set=(document.getElementById(sid+'_set')?.value||'').trim();
+      if(kg) t.push(kg+'kg'); if(rep) t.push(rep+'reps'); if(set) t.push(set+'sets');
+      return t.join(' ');
+    }).filter(Boolean).join(' / ');
+  }
+  return (document.getElementById('v_'+r.rowId)?.value||'').trim();
+}
+function snapForm(){
+  syncOrder();
+  return {
+    client_name: document.getElementById('clientName').value.trim(),
+    date: document.getElementById('sessionDate').value,
+    training: TRL.map(r=>({ id:r.rowId, name:r.key, value:trainValue(r) })),
+    blocks: SBL.map(b=>({ t:(document.getElementById(b+'_t')?.value||'').trim(), c:(document.getElementById(b+'_c')?.value||'').trim() }))
+  };
+}
+function diffSnap(a,b){
+  const out=[];
+  if(a.client_name!==b.client_name) out.push({ field:'client_name', ai:a.client_name, final:b.client_name });
+  if(a.date!==b.date) out.push({ field:'date', ai:a.date, final:b.date });
+  const bi=new Map(b.training.map(r=>[r.id,r]));
+  const ai=new Set(a.training.map(r=>r.id));
+  a.training.forEach(r=>{
+    const f=bi.get(r.id);
+    if(!f) out.push({ field:'train_removed', name:r.name, ai:r.value, final:null });
+    else if(f.value!==r.value) out.push({ field:'train_value', name:r.name, ai:r.value, final:f.value });
+  });
+  b.training.filter(r=>!ai.has(r.id)).forEach(r=>out.push({ field:'train_added', name:r.name, ai:null, final:r.value }));
+  const kept=a.training.filter(r=>bi.has(r.id)).map(r=>r.name);
+  const keptFinal=b.training.filter(r=>ai.has(r.id)).map(r=>r.name);
+  if(kept.join('\n')!==keptFinal.join('\n')) out.push({ field:'train_order', ai:kept, final:keptFinal });
+  const field=t=>t==='体調'?'condition':t==='メモ'?'notes':'block';
+  const blk=x=>new Map(x.blocks.filter(z=>z.t||z.c).map(z=>[z.t,z.c]));
+  const ab=blk(a), bb=blk(b);
+  new Set([...ab.keys(),...bb.keys()]).forEach(t=>{
+    if((ab.get(t)||'')!==(bb.get(t)||'')) out.push({ field:field(t), name:field(t)==='block'?t:undefined, ai:ab.get(t)||null, final:bb.get(t)||null });
+  });
+  return out;
+}
+function plainSnap(x){ return x?{ client_name:x.client_name, date:x.date, training:x.training.map(({name,value})=>({name,value})), blocks:x.blocks }:{}; }
+function queueFeedback(draftId, before, after){
+  const d=store.drafts.find(x=>x.id===draftId); if(!d) return;
+  const last=!store.drafts.some(x=>x.jobId===d.jobId && x.id!==draftId);
+  const diffs=(before&&after)?diffSnap(before,after):[];
+  if(!diffs.length && !last) return;
+  store.pendingFeedback.push({
+    job_id:d.jobId, draft_index:Number(String(d.id).split('_').pop())||0,
+    draft:d.data, final:plainSnap(after), diffs, last
+  });
+  save();
+}
+let flushing=false;
+async function flushFeedback(){
+  if(flushing || !store.pendingFeedback.length || !cfg.token) return;
+  flushing=true;
+  try{
+    while(store.pendingFeedback.length){
+      await apiAt('feedback','POST','',store.pendingFeedback[0]);
+      store.pendingFeedback.shift(); save();
+    }
+  }catch{ /* 通信できないときは端末に残して次回送る */ }
+  flushing=false;
+}
+async function loadMemory(){
+  try{ store.ocrMemory=await apiAt('feedback','GET',''); save(); }catch{}
+  renderMemory();
+}
+function renderMemory(){
+  const el=document.getElementById('memView');
+  const m=store.ocrMemory&&store.ocrMemory.memory;
+  const pending=(store.ocrMemory&&store.ocrMemory.pending)||0;
+  const unsent=store.pendingFeedback.length;
+  const tail=[pending?`学習待ちの訂正 ${pending}件`:'', unsent?`未送信 ${unsent}件`:''].filter(Boolean).join('・');
+  if(!m){ el.innerHTML=`まだありません${tail?'（'+tail+'）':''}。下書きを直して保存すると、その訂正から学習します。`; return; }
+  el.innerHTML=`<div>v${m.version}・訂正 ${m.feedback_count}件から学習${tail?'（'+tail+'）':''}</div>`+
+    ((m.aliases||[]).length?`<div style="margin-top:4px">対応表：${m.aliases.map(a=>`${eh(a.written)}→${eh(a.correct)}`).join('、')}</div>`:'')+
+    ((m.rules||[]).length?`<ul style="margin:4px 0 0 18px">${m.rules.map(r=>`<li>${eh(r)}</li>`).join('')}</ul>`:'');
 }
 
 // ─── バックアップ（URL・端末の移行用）───

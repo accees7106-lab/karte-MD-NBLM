@@ -4,6 +4,10 @@ Supabase の karte_ocr_jobs から status=queued のジョブを取り出し、
 ログイン済みの Claude Code CLI（`claude -p`、サブスクの枠内）で写真を読み取って結果を書き戻す。
 API キーは使わない。
 
+学習：トレーナーが下書きを直して保存すると、その差分が karte_ocr_feedback に記録される。
+手が空いたときに「写真＋AI の読み取り＋直した結果」を見比べて読み癖を要約し、
+karte_ocr_memory に新しい版として追記する（上書きしない＝忘れない）。毎回の読み取りプロンプトに必ず入れる。
+
   python worker.py          常駐（POLL_SEC 秒ごとに確認）
   python worker.py --once   溜まっている分だけ処理して終了
 
@@ -27,6 +31,11 @@ TABLE = "karte_ocr_jobs"
 BUCKET = "karte-ocr"
 STALE_MINUTES = 15
 MAX_ATTEMPTS = 2
+CONSOLIDATE_BATCH = 10      # 1回の学習で見比べる訂正の数
+RECENT_FEEDBACK = 30        # まだ学習に回っていない訂正をプロンプトに直接入れる上限
+MAX_RULES = 80
+IMPORTED_KEEP_DAYS = 14     # 取り込んだまま訂正の報告が来ない写真を残す日数
+FEEDBACK_KEEP_DAYS = 60     # 学習できないまま残った写真の上限
 
 # ─── 出力スキーマ（index.html の applyDraft が読む形）───
 SET_SCHEMA = {
@@ -112,6 +121,12 @@ PROMPT = """あなたはパーソナルジムのトレーナーの手書きノ�
 - 顧客名・プリセット名・種目名は、下の登録済み一覧に近いものがあればその綴りに合わせる。一覧に無いものは書かれた通りに入れる。
 - 顧客名に自信が無ければ client_confidence を "low" にする。
 
+## 過去の訂正から学んだこと（最優先で必ず守る）
+このノートを書くトレーナーは、これまでの読み取り結果を実際に訂正している。下の規則と対応表はその訂正から学んだもの。
+- 一覧に当てはまる書き方を見つけたら、必ず対応表・規則のとおりに読む。同じ間違いを二度としない。
+- 規則と登録済み一覧が食い違うときは、規則を優先する。
+{memory}
+
 ## 推測しない
 - 読めない・あいまいな箇所は推測で埋めず、uncertain に「どこが・なぜ」を短く日本語で書く（例:「RDLの2セット目の重量が判読できない」）。
 - 日付がノートに無ければ date は null。年が書かれていなければ撮影日（{taken}）の年とし、uncertain には書かない。
@@ -194,6 +209,28 @@ class Supabase:
     def update(self, job_id, fields):
         self.request("PATCH", self.table(f"id=eq.{job_id}"), fields, {"Prefer": "return=minimal"})
 
+    def latest_memory(self):
+        rows = self.request("GET", "/rest/v1/karte_ocr_memory?select=*&order=version.desc&limit=1")
+        return rows[0] if rows else None
+
+    def pending_feedback(self, limit):
+        return self.request(
+            "GET", f"/rest/v1/karte_ocr_feedback?select=*&consolidated=eq.false&order=created_at.asc&limit={limit}") or []
+
+    def recent_feedback(self, limit):
+        return self.request(
+            "GET", f"/rest/v1/karte_ocr_feedback?select=diffs&consolidated=eq.false&order=created_at.desc&limit={limit}") or []
+
+    def jobs_by_ids(self, ids):
+        if not ids:
+            return []
+        return self.request("GET", self.table("select=id,image_path,status&id=in.(" + ",".join(ids) + ")")) or []
+
+    def delete_job(self, job):
+        self.request("DELETE", self.table(f"id=eq.{job['id']}"), headers={"Prefer": "return=minimal"})
+        if job.get("image_path"):
+            self.remove(job["image_path"])
+
     def download(self, path):
         return self.request("GET", f"/storage/v1/object/{BUCKET}/{path}", raw=True)
 
@@ -218,10 +255,48 @@ def fmt_context(ctx):
     return clients, presets, assets
 
 
-def build_prompt(image_path, ctx, taken_at=None):
+DIFF_LABELS = {
+    "client_name": "顧客名", "date": "日付", "condition": "体調", "notes": "メモ",
+    "train_value": "種目の内容", "train_removed": "削除された種目", "train_added": "追加された種目",
+    "train_order": "種目の順番", "block": "セッション詳細",
+}
+
+
+def fmt_diff(d):
+    label = DIFF_LABELS.get(d.get("field"), d.get("field") or "?")
+    name = f"「{d['name']}」" if d.get("name") else ""
+
+    def v(x):
+        if isinstance(x, list):
+            return " → ".join(map(str, x))
+        return "（空）" if x in (None, "") else str(x)
+    return f"{label}{name}: AI「{v(d.get('ai'))}」→ 正しくは「{v(d.get('final'))}」"
+
+
+def fmt_memory(memory, recent):
+    lines = []
+    memory = memory or {}
+    aliases = memory.get("aliases") or []
+    if aliases:
+        lines.append("対応表（書かれ方 → 正しい表記）:")
+        lines += [f"- 「{a.get('written')}」→「{a.get('correct')}」" for a in aliases if a.get("written") and a.get("correct")]
+    rules = (memory.get("rules") or [])[:MAX_RULES]
+    if rules:
+        lines.append("読み癖の規則:")
+        lines += [f"- {r}" for r in rules]
+    if recent:
+        lines.append("直近の訂正（まだ規則にまとめていないもの。同じ書き方が出たら同じように直す）:")
+        for f in recent:
+            for d in (f.get("diffs") or [])[:10]:
+                lines.append("- " + fmt_diff(d))
+    return "\n".join(lines) if lines else "（まだ訂正はありません）"
+
+
+def build_prompt(image_path, ctx, taken_at=None, memory=None, recent=None):
     clients, presets, assets = fmt_context(ctx)
     taken = (taken_at or now_iso())[:10]
-    return PROMPT.format(image=image_path, clients=clients, presets=presets, assets=assets, taken=taken)
+    return PROMPT.format(image=image_path, clients=clients, presets=presets, assets=assets, taken=taken,
+                         memory=fmt_memory(memory, recent))
 
 
 def _num(v):
@@ -305,11 +380,12 @@ def claude_cmd():
     return os.environ.get("CLAUDE_CMD") or ("claude.cmd" if os.name == "nt" else "claude")
 
 
-def run_claude(image_path, ctx, workdir, taken_at=None):
+def call_claude(prompt, schema, workdir):
+    """claude -p をサブスクのログインで実行し、スキーマどおりの JSON を返す。"""
     cmd = [
         claude_cmd(), "-p",
         "--output-format", "json",
-        "--json-schema", json.dumps(OUTPUT_SCHEMA, ensure_ascii=False),
+        "--json-schema", json.dumps(schema, ensure_ascii=False),
         "--allowedTools", "Read",
         "--strict-mcp-config",
     ]
@@ -317,7 +393,7 @@ def run_claude(image_path, ctx, workdir, taken_at=None):
         cmd += ["--model", os.environ["CLAUDE_MODEL"]]
     # プロンプトは標準入力で渡す（Windows のコマンドライン長・引用符の問題を避ける）
     proc = subprocess.run(
-        cmd, input=build_prompt(image_path, ctx, taken_at), capture_output=True, text=True,
+        cmd, input=prompt, capture_output=True, text=True,
         encoding="utf-8", cwd=workdir, timeout=int(os.environ.get("CLAUDE_TIMEOUT_SEC", "300")),
     )
     if proc.returncode != 0:
@@ -328,7 +404,12 @@ def run_claude(image_path, ctx, workdir, taken_at=None):
     out = json.loads(proc.stdout)
     if out.get("is_error"):
         raise RuntimeError(f"claude がエラーを返しました: {str(out.get('result'))[:400]}")
-    return normalize_result(out.get("structured_output") or out.get("result") or "")
+    return out.get("structured_output") or out.get("result") or ""
+
+
+def run_claude(image_path, ctx, workdir, taken_at=None, memory=None, recent=None):
+    prompt = build_prompt(image_path, ctx, taken_at, memory, recent)
+    return normalize_result(call_claude(prompt, OUTPUT_SCHEMA, workdir))
 
 
 def process(sb, job):
@@ -344,14 +425,15 @@ def process(sb, job):
         last = None
         for _ in range(MAX_ATTEMPTS):
             try:
-                result = run_claude(image, job.get("context"), workdir, job.get("taken_at"))
+                result = run_claude(image, job.get("context"), workdir, job.get("taken_at"),
+                                    *load_learning(sb))
                 break
             except (ValueError, json.JSONDecodeError) as e:
                 last = e  # 出力の形が崩れたときだけ再試行する
         else:
             raise RuntimeError(f"読み取り結果の形式が不正です: {last}")
+        # 写真はまだ消さない：訂正があれば学習に使う（訂正が無ければ取り込み後に api/feedback が消す）
         sb.update(job["id"], {"status": "done", "result": result, "error": None, "processed_at": now_iso()})
-        sb.remove(job["image_path"])  # 読み取り済みの写真はすぐ消す
         log(f"完了 {job['id']}：{len(result['karte'])}件")
     except NotLoggedIn:
         sb.update(job["id"], {"status": "queued", "attempts": attempts - 1})  # 写真の問題ではないので待ちに戻す
@@ -361,6 +443,151 @@ def process(sb, job):
         log(f"エラー {job['id']}：{e}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def load_learning(sb):
+    """読み取りプロンプトに入れる学習内容（最新版の読み癖＋まだまとめていない直近の訂正）。"""
+    try:
+        return sb.latest_memory(), sb.recent_feedback(RECENT_FEEDBACK)
+    except urllib.error.HTTPError as e:
+        log(f"学習内容を読めませんでした（読み取りは続けます）：{e}")
+        return None, []
+
+
+MEMORY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "rules": {"type": "array", "items": {"type": "string"}},
+        "aliases": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "written": {"type": "string"},
+                    "correct": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["client", "exercise", "preset", "other"]},
+                },
+                "required": ["written", "correct", "kind"],
+            },
+        },
+    },
+    "required": ["rules", "aliases"],
+}
+
+CONSOLIDATE_PROMPT = """あなたは、パーソナルジムのトレーナーの手書きノートを読み取る AI の「読み癖ノート」を管理する係です。
+読み取り AI が出した下書きを、トレーナーが訂正しました。写真・AI の読み取り・訂正後の内容を見比べて、
+次回から同じ間違いをしないための規則と対応表を更新してください。
+
+## 手順
+1. 下の各ケースについて、写真（Read ツールで開く）を見て、なぜ読み間違えたかを確かめる。
+   字の形の癖（例:「7」と「1」が似ている、「バ」の濁点が薄い）、略記（例:「SQ」＝スクワット）、書く位置の決まりなどを見つける。
+2. 書かれ方と正しい表記が1対1で決まるもの（略記・崩し字・綴り違い）は aliases に入れる。kind は client / exercise / preset / other。
+3. それ以外の傾向は rules に、読み取り AI がそのまま守れる具体的な指示として短い日本語で書く。
+   読み取り AI の出力項目は client_name / date / condition / warmup(preset, changes) / training(name, sets[kg, reps, sets], text) / notes / uncertain。規則で項目に触れるときはこの名前を使う。
+4. 単なる内容の追記（AI の読み違いではなく、トレーナーが後から書き足しただけ）は学習しない。
+
+## 忘れないためのルール（厳守）
+- 既存の rules と aliases は、新しい訂正と矛盾しない限り**すべてそのまま残す**。言い換えて短くまとめるのはよいが、意味を落とさない。
+- 新しい訂正と矛盾する古い規則だけ、新しい内容に置き換える。
+- rules は最大 {max_rules} 件。似た規則は1つにまとめる。
+
+## 既存の読み癖
+rules:
+{rules}
+aliases:
+{aliases}
+
+## 今回の訂正
+{cases}
+"""
+
+
+def fmt_case(i, fb, image):
+    draft = json.dumps(fb.get("draft") or {}, ensure_ascii=False)
+    final = json.dumps(fb.get("final") or {}, ensure_ascii=False)
+    diffs = "\n".join("  - " + fmt_diff(d) for d in fb.get("diffs") or [])
+    img = f"写真: {image}" if image else "写真: （残っていない。テキストだけで判断する）"
+    return f"### ケース{i}\n{img}\nAI の読み取り: {draft}\n訂正後: {final}\n差分:\n{diffs}"
+
+
+def merge_memory(old, new):
+    """取りこぼし防止：対応表は和集合（同じ書かれ方は新しい方を採用）、規則は激減したら採用しない。"""
+    old = old or {}
+    old_rules = old.get("rules") or []
+    rules = [r.strip() for r in new.get("rules") or [] if isinstance(r, str) and r.strip()][:MAX_RULES]
+    if old_rules and len(rules) < max(1, int(len(old_rules) * 0.7)):
+        raise ValueError(f"規則が {len(old_rules)} 件から {len(rules)} 件に減ったため、忘れている可能性があるので採用しません")
+    aliases = {}
+    for a in (old.get("aliases") or []) + (new.get("aliases") or []):
+        if isinstance(a, dict) and _str(a.get("written")) and _str(a.get("correct")) and a["written"] != a["correct"]:
+            kind = a.get("kind") if a.get("kind") in ("client", "exercise", "preset", "other") else "other"
+            aliases[(kind, a["written"].strip())] = {"written": a["written"].strip(), "correct": a["correct"].strip(), "kind": kind}
+    return {"rules": rules, "aliases": list(aliases.values())}
+
+
+def consolidate(sb):
+    """まだ学習に回っていない訂正を写真と見比べ、読み癖ノートの新しい版を作る。"""
+    pending = sb.pending_feedback(CONSOLIDATE_BATCH)
+    if not pending:
+        return False
+    old = sb.latest_memory() or {"version": 0, "rules": [], "aliases": [], "feedback_count": 0}
+    jobs = {j["id"]: j for j in sb.jobs_by_ids(sorted({f["job_id"] for f in pending}))}
+    workdir = tempfile.mkdtemp(prefix="karte-learn-")
+    try:
+        cases = []
+        for i, fb in enumerate(pending, 1):
+            job, image = jobs.get(fb["job_id"]), None
+            if job and job.get("image_path"):
+                try:
+                    image = os.path.join(workdir, f"case{i}" + (os.path.splitext(job["image_path"])[1] or ".jpg"))
+                    with open(image, "wb") as f:
+                        f.write(sb.download(job["image_path"]))
+                except urllib.error.HTTPError:
+                    image = None
+            cases.append(fmt_case(i, fb, image))
+        prompt = CONSOLIDATE_PROMPT.format(
+            max_rules=MAX_RULES,
+            rules="\n".join(f"- {r}" for r in old.get("rules") or []) or "（なし）",
+            aliases="\n".join(f"- 「{a['written']}」→「{a['correct']}」({a.get('kind')})" for a in old.get("aliases") or []) or "（なし）",
+            cases="\n\n".join(cases),
+        )
+        log(f"学習開始：訂正 {len(pending)} 件")
+        new = call_claude(prompt, MEMORY_SCHEMA, workdir)
+        if isinstance(new, str):
+            new = extract_json(new)
+        merged = merge_memory(old, new)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    version = (old.get("version") or 0) + 1
+    sb.request("POST", "/rest/v1/karte_ocr_memory", {
+        "version": version, "rules": merged["rules"], "aliases": merged["aliases"],
+        "feedback_count": (old.get("feedback_count") or 0) + len(pending),
+    }, {"Prefer": "return=minimal"})
+    ids = ",".join(str(f["id"]) for f in pending)
+    sb.request("PATCH", f"/rest/v1/karte_ocr_feedback?id=in.({ids})",
+               {"consolidated": True, "consolidated_at": now_iso(), "memory_version": version},
+               {"Prefer": "return=minimal"})
+    # 学習に使い終わった写真を消す（その写真の訂正がすべて学習済みのものだけ）
+    for job in jobs.values():
+        if job.get("status") != "feedback":
+            continue
+        left = sb.request("GET", f"/rest/v1/karte_ocr_feedback?select=id&job_id=eq.{job['id']}&consolidated=eq.false&limit=1")
+        if not left:
+            sb.delete_job(job)
+    log(f"学習完了：読み癖 v{version}（規則 {len(merged['rules'])} 件・対応表 {len(merged['aliases'])} 件）")
+    return True
+
+
+def cleanup(sb):
+    """訂正の報告が来ないまま残った写真を期限で消す。"""
+    def older(days):
+        return urllib.parse.quote((datetime.now(timezone.utc) - timedelta(days=days)).isoformat())
+    stale = (sb.request("GET", sb.table(f"select=id,image_path,status&status=eq.imported&imported_at=lt.{older(IMPORTED_KEEP_DAYS)}")) or []) + \
+            (sb.request("GET", sb.table(f"select=id,image_path,status&status=eq.feedback&processed_at=lt.{older(FEEDBACK_KEEP_DAYS)}")) or [])
+    for job in stale:
+        sb.delete_job(job)
+    if stale:
+        log(f"期限切れの写真 {len(stale)} 件を削除しました")
 
 
 def check_env():
@@ -381,6 +608,7 @@ def main():
     check_env()
     sb = Supabase(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
     poll = int(os.environ.get("POLL_SEC", "30"))
+    learn_retry_at = 0
     log("ocr-worker 起動" + ("（--once）" if args.once else f"（{poll}秒ごとに確認）"))
     while True:
         try:
@@ -390,6 +618,16 @@ def main():
                 if not job:
                     break
                 process(sb, job)
+            # 読み取り待ちが無いときに学習する（読み取りを優先）。失敗したら30分は再挑戦しない
+            while time.time() >= learn_retry_at and not sb.request("GET", sb.table("select=id&status=eq.queued&limit=1")):
+                try:
+                    if not consolidate(sb):
+                        break
+                except (ValueError, RuntimeError, json.JSONDecodeError) as e:
+                    log(f"学習に失敗しました（訂正は残っているので30分後にやり直します）：{e}")
+                    learn_retry_at = time.time() + 1800
+                    break
+            cleanup(sb)
         except NotLoggedIn as e:
             sys.exit(str(e))
         except urllib.error.URLError as e:

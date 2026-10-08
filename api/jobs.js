@@ -1,56 +1,18 @@
 // 手書きノート読み取りジョブの受付（Vercel Function）
 //   POST   写真を受け取り Supabase Storage に保存し、ジョブ（status=queued）を作る
-//   GET    未取り込みのジョブと読み取り結果の一覧
-//   PATCH  ?id=  エラーになったジョブを再読み取りに戻す（body: {status:'queued'}）
-//   DELETE ?id=  ジョブと写真を削除（結果を下書きに取り込んだ後に呼ばれる）
-// 読み取り本体はノートPCの ocr-worker が行う（ここでは AI を呼ばない）
+//   GET    画面に出すジョブ（読み取り待ち・読み取り中・完了・エラー）と読み取り結果
+//   PATCH  ?id=  {status:'queued'} エラーを再読み取りに戻す／{status:'imported'} 下書きに取り込んだ印
+//   DELETE ?id=  ジョブと写真を削除
+// 読み取り本体はノートPCの ocr-worker が行う（ここでは AI を呼ばない）。
+// 取り込み後の写真は、訂正の学習（api/feedback.js → ocr-worker）が済むまで残す。
 const crypto = require('crypto');
+const { BUCKET, fail, sb, validId, deleteJobRow, route } = require('./_lib');
 
 const TABLE = 'karte_ocr_jobs';
-const BUCKET = 'karte-ocr';
 // Vercel Function のリクエスト上限は 4.5MB（base64 で約1.33倍になる）
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 const LIST_COLUMNS = 'id,status,filename,taken_at,created_at,processed_at,result,error';
-
-function env(name) {
-  const v = process.env[name];
-  if (!v) throw Object.assign(new Error(`サーバー設定 ${name} がありません`), { status: 500 });
-  return v;
-}
-
-function authorized(req) {
-  const expected = process.env.APP_TOKEN;
-  if (!expected) return false;
-  const got = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  const h = s => crypto.createHash('sha256').update(s).digest();
-  return crypto.timingSafeEqual(h(got), h(expected));
-}
-
-function setCors(req, res) {
-  const allowed = String(process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-  const origin = req.headers.origin;
-  if (origin && allowed.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type');
-  }
-}
-
-async function sb(path, { method = 'GET', headers = {}, body } = {}) {
-  const key = env('SUPABASE_SERVICE_ROLE_KEY');
-  const res = await fetch(env('SUPABASE_URL').replace(/\/+$/, '') + path, {
-    method,
-    headers: Object.assign({ apikey: key, Authorization: `Bearer ${key}` }, headers),
-    body,
-  });
-  const text = await res.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  return { ok: res.ok, status: res.status, data };
-}
-
-function fail(msg, status) { return Object.assign(new Error(msg), { status }); }
+const VISIBLE = 'queued,processing,done,error';
 
 function parseImage(dataUrl) {
   const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ''));
@@ -61,18 +23,13 @@ function parseImage(dataUrl) {
   return { type: m[1], ext: m[1] === 'image/png' ? 'png' : m[1] === 'image/webp' ? 'webp' : 'jpg', buf };
 }
 
-function validId(id) {
-  if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) throw fail('id が不正です', 400);
-  return id;
-}
-
 async function listJobs() {
-  const r = await sb(`/rest/v1/${TABLE}?select=${LIST_COLUMNS}&order=created_at.asc&limit=200`);
+  const r = await sb(`/rest/v1/${TABLE}?select=${LIST_COLUMNS}&status=in.(${VISIBLE})&order=created_at.asc&limit=200`);
   if (!r.ok) throw fail('ジョブ一覧の取得に失敗しました', 502);
   return { jobs: r.data };
 }
 
-async function createJob(body) {
+async function createJob({ body }) {
   const img = parseImage(body.image);
   const id = crypto.randomUUID();
   const imagePath = `${id}.${img.ext}`;
@@ -100,51 +57,27 @@ async function createJob(body) {
   return { id, status: 'queued' };
 }
 
-async function requeueJob(id, body) {
-  if (!body || body.status !== 'queued') throw fail('status は queued のみ指定できます', 400);
-  const r = await sb(`/rest/v1/${TABLE}?id=eq.${id}&status=eq.error`, {
+// 遷移できるのは error→queued（再読み取り）と done→imported（取り込み済み）だけ
+const TRANSITIONS = { queued: 'error', imported: 'done' };
+
+async function updateJob({ query, body }) {
+  const id = validId(query.id);
+  const from = TRANSITIONS[body && body.status];
+  if (!from) throw fail('status は queued か imported のみ指定できます', 400);
+  const fields = body.status === 'queued' ? { status: 'queued', error: null } : { status: 'imported', imported_at: new Date().toISOString() };
+  const r = await sb(`/rest/v1/${TABLE}?id=eq.${id}&status=eq.${from}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
-    body: JSON.stringify({ status: 'queued', error: null }),
+    body: JSON.stringify(fields),
   });
   if (!r.ok) throw fail('更新に失敗しました', 502);
-  if (!Array.isArray(r.data) || !r.data.length) throw fail('エラー状態のジョブが見つかりません', 404);
-  return { id, status: 'queued' };
+  if (!Array.isArray(r.data) || !r.data.length) throw fail('対象のジョブが見つかりません', 404);
+  return { id, status: body.status };
 }
 
-async function deleteJob(id) {
-  const r = await sb(`/rest/v1/${TABLE}?id=eq.${id}`, {
-    method: 'DELETE', headers: { Prefer: 'return=representation' },
-  });
-  if (!r.ok) throw fail('削除に失敗しました', 502);
-  for (const row of Array.isArray(r.data) ? r.data : []) {
-    if (row.image_path) await sb(`/storage/v1/object/${BUCKET}/${row.image_path}`, { method: 'DELETE' });
-  }
-  return { id, deleted: Array.isArray(r.data) ? r.data.length : 0 };
+async function deleteJob({ query }) {
+  const id = validId(query.id);
+  return { id, deleted: await deleteJobRow(id) };
 }
 
-async function handler(req, res) {
-  setCors(req, res);
-  if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end(); }
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  try {
-    if (!authorized(req)) throw fail('アクセストークンが違います', 401);
-    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    const id = req.query && req.query.id;
-    let out;
-    if (req.method === 'GET') out = await listJobs();
-    else if (req.method === 'POST') out = await createJob(body);
-    else if (req.method === 'PATCH') out = await requeueJob(validId(id), body);
-    else if (req.method === 'DELETE') out = await deleteJob(validId(id));
-    else throw fail('Method Not Allowed', 405);
-    res.statusCode = 200;
-    res.end(JSON.stringify(out));
-  } catch (e) {
-    res.statusCode = e.status || 500;
-    res.end(JSON.stringify({ error: e.status ? e.message : 'サーバーエラー' }));
-    if (!e.status) console.error(e);
-  }
-}
-
-module.exports = handler;
+module.exports = route({ GET: listJobs, POST: createJob, PATCH: updateJob, DELETE: deleteJob });
