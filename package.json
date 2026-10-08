@@ -1,0 +1,13 @@
+{
+  "name": "karte-md-nblm",
+  "private": true,
+  "description": "トレーニングカルテ（静的ページ + 手書きノート読み取り API）",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test test/api.test.js && python3 -W ignore -m unittest discover -s test -p \"test_*.py\"",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

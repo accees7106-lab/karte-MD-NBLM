@@ -4,13 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>トレーニングカルテ</title>
-  <link rel="manifest" href="/karte-MD-NBLM/manifest.json">
+  <link rel="manifest" href="manifest.json">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="カルテ">
   <meta name="theme-color" content="#1d4ed8">
-  <link rel="apple-touch-icon" href="/karte-MD-NBLM/icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     :root{
@@ -194,6 +194,31 @@
     #pinInput:focus{outline:none;border-color:var(--p);box-shadow:0 0 0 3px rgba(29,78,216,.1)}
     #pinError{display:none;color:var(--ng);font-size:.82rem;margin-top:10px}
     .pin-expire{font-size:.75rem;color:var(--mu);margin-top:14px}
+
+    /* drag handle */
+    .dh{cursor:grab;color:var(--mu);font-size:1.05rem;line-height:1;padding:4px 6px;
+      user-select:none;-webkit-user-select:none;touch-action:none;flex-shrink:0}
+    .dh:active{cursor:grabbing}
+    .sortable-ghost{opacity:.35}
+    .sortable-chosen{box-shadow:0 4px 14px rgba(15,23,42,.15)}
+
+    /* OCR import */
+    .ocr-st{font-size:.84rem;color:var(--mu);margin:8px 0}
+    .ocr-st b{color:var(--tx)}
+    .ocr-row{display:flex;align-items:center;justify-content:space-between;gap:8px;
+      padding:7px 11px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px;
+      font-size:.86rem;background:#fafafa}
+    .ocr-row .rm{margin-top:0}
+    .warn{color:#a16207;font-weight:700}
+    .err{color:var(--ng);font-weight:700}
+    .draft-bar{display:none;background:#fefce8;border:1.5px solid #fde047;border-radius:10px;
+      padding:11px 16px;margin-bottom:12px;font-size:.86rem;color:#713f12}
+    .draft-bar.show{display:block}
+    .draft-bar ul{margin:6px 0 0 18px}
+    .draft-bar-hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    details.cfg{margin-top:10px;font-size:.85rem}
+    details.cfg summary{cursor:pointer;color:var(--mu);font-weight:600}
+    details.cfg .fg{margin-top:9px}
   </style>
 </head>
 <body>
@@ -227,6 +252,52 @@
   <h1>トレーニングカルテ</h1>
   <p>セッション記録・カルテ生成システム</p>
 </header>
+
+<!-- 写真から一括読み込み -->
+<div class="card" id="ocrCard">
+  <h2>📷 手書きノートから読み込み</h2>
+  <div class="asrow">
+    <input type="file" id="ocrFiles" accept="image/*" multiple style="flex:1;font-size:.85rem">
+    <button class="btn bp" id="ocrUploadBtn" onclick="uploadPhotos()">送信</button>
+  </div>
+  <p class="hint">ノートの写真をまとめて選んで送信 → ノートPCで読み取り → 「結果を取り込む」で下書きになります</p>
+  <div class="ocr-st" id="ocrStatus"></div>
+  <div style="display:flex;gap:7px;flex-wrap:wrap">
+    <button class="btn bo bsm" onclick="syncJobs(true)">🔄 結果を取り込む</button>
+  </div>
+  <div id="ocrJobs" style="margin-top:10px"></div>
+  <div id="draftList" style="margin-top:6px"></div>
+  <details class="cfg">
+    <summary>設定・データ移行</summary>
+    <div class="fg">
+      <label>アクセストークン</label>
+      <input type="password" id="cfgToken" placeholder="Vercel の APP_TOKEN と同じ値" autocomplete="off">
+    </div>
+    <div class="fg">
+      <label>API の場所（通常は空欄）</label>
+      <input type="text" id="cfgApi" placeholder="例: https://xxxx.vercel.app（同じサイトなら空欄）" autocomplete="off">
+    </div>
+    <button class="btn bo bsm" onclick="saveCfg()">設定を保存</button>
+    <div class="fg">
+      <label>データ移行（別のURL・端末へ）</label>
+      <div style="display:flex;gap:7px;flex-wrap:wrap">
+        <button class="btn bo bsm" onclick="exportBackup()">⬇ 全データを書き出し</button>
+        <button class="btn bo bsm" onclick="document.getElementById('backupFile').click()">⬆ 読み込み</button>
+        <input type="file" id="backupFile" accept="application/json,.json" style="display:none" onchange="importBackup(this)">
+      </div>
+      <p class="hint">顧客・プリセット・種目・蓄積カルテを丸ごと移せます（読み込みは既存データに追加）</p>
+    </div>
+  </details>
+</div>
+
+<!-- 下書きの要確認 -->
+<div class="draft-bar" id="draftBar">
+  <div class="draft-bar-hd">
+    <strong id="draftTitle">下書きを編集中</strong>
+    <button class="btn bsm" style="border:1px solid #fde047;color:#713f12" onclick="discardDraft()">この下書きを破棄</button>
+  </div>
+  <div id="draftNotes"></div>
+</div>
 
 <!-- 基本情報 -->
 <div class="card">
@@ -388,6 +459,7 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="vendor/Sortable.min.js"></script>
 <script>
 'use strict';
 
@@ -447,10 +519,12 @@ function loadStore() {
     if (!s.trainAssets)    s.trainAssets = [];
     if (!s.trainPresets)   s.trainPresets = [];
     if (!s.records)        s.records = [];
+    if (!s.drafts)         s.drafts = [];
+    if (!s.importedJobs)   s.importedJobs = [];
     return s;
   } catch { return ns(); }
 }
-function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[] }; }
+function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[], drafts:[], importedJobs:[] }; }
 function save() {
   try { localStorage.setItem(SK, JSON.stringify(store)); }
   catch { toast('⚠ 保存領域が不足しています'); }
@@ -481,6 +555,10 @@ migrate();
 let CRL=[], SRL=[], TRL=[], SBL=[];
 let cRItems=[], tRType='structured';
 let curMd=null, curFn=null;
+let curDraftId=null, curWuPreset=null;
+let _uid=0;
+function uid(pre){ return pre+Date.now().toString(36)+'_'+(++_uid); }
+const DH='<span class="dh" title="ドラッグで並べ替え">⠿</span>';
 
 // ─── INIT ───
 function init() {
@@ -495,6 +573,30 @@ function init() {
 
   addSBlock();
   checkReminder();
+  initSortables();
+  loadCfg(); renderDrafts(); renderJobs();
+  if(cfg.token) syncJobs(false);
+}
+
+// ─── DRAG REORDER ───
+// 各リストの並びは DOM が正。並べ替え後に実行時配列を DOM 順へ揃える（generateKarte は配列順に出力する）
+function initSortables(){
+  if(typeof Sortable==='undefined') return;
+  ['checkRows','seitaiRows','trainRows','sessionBlocks'].forEach(id=>{
+    Sortable.create(document.getElementById(id),{
+      handle:'.dh', draggable:'.cb,.sr,.tb2,.sbl', animation:150,
+      // ネイティブ D&D はスマホ（特に iOS）で不安定なので、マウス・タッチとも Sortable 側の実装で動かす
+      forceFallback:true, fallbackTolerance:3, onEnd:syncOrder
+    });
+  });
+}
+function domOrder(id){ return [...document.getElementById(id).children].map(e=>e.id).filter(Boolean); }
+function byOrder(arr,order,key){ return [...arr].sort((a,b)=>order.indexOf(key(a))-order.indexOf(key(b))); }
+function syncOrder(){
+  CRL=byOrder(CRL,domOrder('checkRows'),r=>r.rowId);
+  TRL=byOrder(TRL,domOrder('trainRows'),r=>r.rowId);
+  SRL=byOrder(SRL,domOrder('seitaiRows'),r=>r);
+  SBL=byOrder(SBL,domOrder('sessionBlocks'),r=>r);
 }
 
 function today() {
@@ -553,6 +655,7 @@ function applyPreset() {
     addTBlock(it.name, it.type, false);
     added++;
   });
+  curWuPreset=name;
   toast(skipped ? `${added}件追加（${skipped}件は重複でスキップ）` : `${added}件を一括追加しました`);
 }
 function openPresetSave() {
@@ -629,7 +732,7 @@ function cancelCheckRP() {
 }
 function addCBlock(name,items,isNew) {
   clrEmpty('checkRows');
-  const rid='cr_'+Date.now();
+  const rid=uid('cr_');
   CRL.push({ key:name, rowId:rid, items:[...items] });
   const b=document.createElement('div');
   b.className='cb'; b.id=rid;
@@ -651,7 +754,7 @@ function addCBlock(name,items,isNew) {
   </div>`;
   b.innerHTML=`<div class="cb-hd">
     <div style="display:flex;align-items:center;gap:6px">
-      <span class="ktag">${eh(name)}</span>${isNew?'<span class="nbadge">NEW</span>':''}
+      ${DH}<span class="ktag">${eh(name)}</span>${isNew?'<span class="nbadge">NEW</span>':''}
     </div>
     <button class="btn bd2" onclick="rmCBlock('${rid}')">✕ 削除</button>
   </div>${body}`;
@@ -666,10 +769,10 @@ function rmCBlock(rid) {
 // ─── SEITAI ───
 function addSeitaiRow() {
   clrEmpty('seitaiRows');
-  const rid='sr_'+Date.now(); SRL.push(rid);
+  const rid=uid('sr_'); SRL.push(rid);
   const d=document.createElement('div');
   d.className='sr'; d.id=rid;
-  d.innerHTML=`<input type="text" id="v_${rid}" placeholder="例: 大臀筋・梨状筋のリリース">
+  d.innerHTML=`${DH}<input type="text" id="v_${rid}" placeholder="例: 大臀筋・梨状筋のリリース">
     <button class="btn bd2" onclick="rmSRow('${rid}')">✕</button>`;
   document.getElementById('seitaiRows').appendChild(d);
   document.getElementById('v_'+rid).focus();
@@ -712,7 +815,7 @@ function cancelTrainRP() {
 }
 function addTBlock(name,type,isNew) {
   clrEmpty('trainRows');
-  const rid='tr_'+Date.now();
+  const rid=uid('tr_');
   TRL.push({ key:name, rowId:rid, type, setIds:[] });
   const b=document.createElement('div');
   b.className='tb2'; b.id=rid;
@@ -721,7 +824,7 @@ function addTBlock(name,type,isNew) {
     :`<div style="padding-left:6px"><input type="text" id="v_${rid}" placeholder="例: 60秒 左右 3セット" style="margin-top:2px"></div>`;
   b.innerHTML=`<div class="tb2-hd">
     <div style="display:flex;align-items:center;gap:6px">
-      <span class="ktag">${eh(name)}</span>${isNew?'<span class="nbadge">NEW</span>':''}
+      ${DH}<span class="ktag">${eh(name)}</span>${isNew?'<span class="nbadge">NEW</span>':''}
       <span class="ftag">${type==='structured'?'kg/reps/sets':'フリー'}</span>
     </div>
     <button class="btn bd2" onclick="rmTBlock('${rid}')">✕ 削除</button>
@@ -731,7 +834,7 @@ function addTBlock(name,type,isNew) {
 }
 function addSetRow(rid) {
   const obj=TRL.find(r=>r.rowId===rid); if(!obj) return;
-  const sid='set_'+Date.now();
+  const sid=uid('set_');
   obj.setIds.push(sid);
   const d=document.createElement('div');
   d.className='set-row'; d.id=sid;
@@ -758,12 +861,12 @@ function rmTBlock(rid) {
 
 // ─── SESSION BLOCKS ───
 function addSBlock() {
-  const bid='sb_'+Date.now(); SBL.push(bid);
+  const bid=uid('sb_'); SBL.push(bid);
   const el=document.getElementById('sessionBlocks');
   const d=document.createElement('div');
   d.className='sbl'; d.id=bid;
   d.innerHTML=`<div class="sbl-hd">
-    <input type="text" id="${bid}_t" placeholder="ブロックタイトル（例: 肩周りの動き）">
+    ${DH}<input type="text" id="${bid}_t" placeholder="ブロックタイトル（例: 肩周りの動き）">
     <button class="btn bd2" onclick="rmSBlock('${bid}')">✕</button>
   </div>
   <textarea id="${bid}_c" placeholder="所感・詳細を入力..."></textarea>`;
@@ -904,7 +1007,11 @@ function generateKarte() {
   ra.classList.remove('ph');
   ra.scrollIntoView({behavior:'smooth',block:'start'});
 
-  store.clients[cname]={sessions:sess,lastDate:date};
+  store.clients[cname]=Object.assign({}, store.clients[cname], {sessions:sess,lastDate:date});
+  if(curWuPreset) store.clients[cname].wuPreset=curWuPreset;
+  TRL.forEach(r=>{ if(!store.trainAssets.find(a=>a.name===r.key)) store.trainAssets.push({name:r.key,type:r.type}); });
+  refreshADL();
+  if(curDraftId) finishDraft(curDraftId);
   const recId=df(date)+'_'+cname;
   store.records=store.records.filter(r=>r.id!==recId);
   store.records.unshift({id:recId,clientName:cname,date,totalSessions:sess,content:md});
@@ -914,6 +1021,7 @@ function generateKarte() {
   toast(daysSince>=REMIND_DAYS
     ? '✅ 保存しました。今週のエクスポートもお忘れなく！'
     : '✅ カルテを生成・保存しました');
+  if(store.drafts.length) showNextDraftHint();
 }
 
 // ─── HUMAN-READABLE TEXT BUILDERS ───
@@ -1093,6 +1201,11 @@ function closeErrBtn(){ document.getElementById('errOverlay').classList.remove('
 // ─── RESET ───
 function resetForm(){
   if(!confirm('フォームをリセットしますか？')) return;
+  clearForm(); addSBlock();
+  toast('リセットしました');
+}
+function clearForm(){
+  curDraftId=null; curWuPreset=null; renderDraftBar(null);
   document.getElementById('clientName').value='';
   document.getElementById('sessionDate').value=today();
   document.getElementById('totalSessions').value='1';
@@ -1105,8 +1218,6 @@ function resetForm(){
   document.getElementById('resultArea').classList.add('ph');
   cancelCheckRP(); cancelTrainRP();
   curMd=null; curFn=null;
-  addSBlock();
-  toast('リセットしました');
 }
 
 // ─── UTILS ───
@@ -1120,11 +1231,354 @@ function toast(msg){
   clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2600);
 }
 
+// ─── 手書きノート読み込み（OCR）────────────────────────────
+// 写真 → /api/jobs（Vercel）→ ノートPCの ocr-worker が claude -p で読み取り → 結果を下書きとして取り込む
+const CFG_KEY='karte_ocr_cfg';
+let cfg={ token:'', api:'' };
+let ocrJobs=[];
+
+function loadCfg(){
+  try{ cfg=Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY)||'{}')); }catch{}
+  document.getElementById('cfgToken').value=cfg.token||'';
+  document.getElementById('cfgApi').value=cfg.api||'';
+}
+function saveCfg(){
+  cfg.token=document.getElementById('cfgToken').value.trim();
+  cfg.api=document.getElementById('cfgApi').value.trim().replace(/\/+$/,'');
+  try{ localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }catch{}
+  toast('設定を保存しました');
+  if(cfg.token) syncJobs(false);
+}
+async function api(method, query, body){
+  if(!cfg.token) throw new Error('設定でアクセストークンを入力してください');
+  const res=await fetch(`${cfg.api}/api/jobs${query||''}`,{
+    method,
+    headers:Object.assign({ 'Authorization':'Bearer '+cfg.token }, body?{'Content-Type':'application/json'}:{}),
+    body: body?JSON.stringify(body):undefined
+  });
+  const data=await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || `通信エラー (${res.status})`);
+  return data;
+}
+
+function norm(s){ return String(s||'').normalize('NFKC').replace(/\s+/g,'').toLowerCase(); }
+function findByName(list, name, key){
+  key=key||(x=>x.name);
+  return list.find(x=>key(x)===name) || list.find(x=>norm(key(x))===norm(name));
+}
+
+// 送信時点の顧客・プリセット・種目一覧（読み取った名前を既存の綴りに寄せるため）
+function buildOcrContext(){
+  return {
+    clients: Object.keys(store.clients).map(n=>({ name:n, wu_preset:store.clients[n].wuPreset||null })),
+    presets: store.trainPresets.map(p=>({ name:p.name, items:p.items.map(i=>i.name) })),
+    train_assets: store.trainAssets.map(a=>({ name:a.name, type:a.type }))
+  };
+}
+
+function resizeImage(file, maxSide=1600){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(file);
+    const img=new Image();
+    img.onload=()=>{
+      const k=Math.min(1, maxSide/Math.max(img.naturalWidth,img.naturalHeight));
+      const c=document.createElement('canvas');
+      c.width=Math.round(img.naturalWidth*k); c.height=Math.round(img.naturalHeight*k);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg',0.85));
+    };
+    img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error(file.name+' を画像として読めません')); };
+    img.src=url;
+  });
+}
+
+async function uploadPhotos(){
+  const input=document.getElementById('ocrFiles');
+  const files=[...input.files];
+  if(!files.length){ toast('写真を選択してください'); return; }
+  if(!cfg.token){ toast('設定でアクセストークンを入力してください'); document.querySelector('details.cfg').open=true; return; }
+  const btn=document.getElementById('ocrUploadBtn');
+  btn.disabled=true;
+  const context=buildOcrContext();
+  let done=0, failed=[];
+  const st=document.getElementById('ocrStatus');
+  const queue=[...files];
+  async function worker(){
+    while(queue.length){
+      const f=queue.shift();
+      try{
+        const image=await resizeImage(f);
+        await api('POST','',{ image, filename:f.name, taken_at:new Date(f.lastModified||Date.now()).toISOString(), context });
+        done++;
+      }catch(e){ failed.push(`${f.name}: ${e.message}`); }
+      st.innerHTML=`送信中… <b>${done+failed.length}</b> / ${files.length}`;
+    }
+  }
+  await Promise.all([worker(),worker()]);
+  btn.disabled=false; input.value='';
+  toast(failed.length?`${done}枚送信・${failed.length}枚失敗`:`${done}枚を送信しました`);
+  if(failed.length) alert('送信できなかった写真:\n'+failed.join('\n'));
+  await syncJobs(false);
+}
+
+async function syncJobs(manual){
+  let data;
+  try{ data=await api('GET',''); }
+  catch(e){ if(manual) toast('⚠ '+e.message); renderJobs(e.message); return; }
+  ocrJobs=data.jobs||[];
+  let added=0;
+  for(const j of ocrJobs.filter(j=>j.status==='done')){
+    if(!store.importedJobs.includes(j.id)){
+      added+=importJobResult(j);
+      store.importedJobs.push(j.id);
+      store.importedJobs=store.importedJobs.slice(-300);
+      if(j.processed_at && (!store.lastOcrAt || j.processed_at>store.lastOcrAt)) store.lastOcrAt=j.processed_at;
+      save();
+    }
+    // 取り込んだら（下書きは端末に保存済み）サーバー側の行は消す
+    try{ await api('DELETE','?id='+encodeURIComponent(j.id)); }catch{}
+  }
+  ocrJobs=ocrJobs.filter(j=>j.status!=='done');
+  renderJobs(); renderDrafts();
+  if(added) toast(`📝 下書きを${added}件取り込みました`);
+  else if(manual) toast('新しい結果はありません');
+}
+
+function importJobResult(job){
+  const list=(job.result&&Array.isArray(job.result.karte))?job.result.karte:[];
+  const fallbackDate=(job.taken_at||job.created_at||'').slice(0,10)||today();
+  list.forEach((k,i)=>{
+    store.drafts.push({ id:job.id+'_'+i, jobId:job.id, date:k.date||fallbackDate, data:k });
+  });
+  return list.length;
+}
+
+function renderJobs(errMsg){
+  const st=document.getElementById('ocrStatus');
+  const q=ocrJobs.filter(j=>j.status==='queued').length;
+  const p=ocrJobs.filter(j=>j.status==='processing').length;
+  const e=ocrJobs.filter(j=>j.status==='error');
+  const parts=[];
+  if(errMsg) parts.push(`<span class="err">⚠ ${eh(errMsg)}</span>`);
+  if(q) parts.push(`読み取り待ち <b>${q}</b>件`);
+  if(p) parts.push(`読み取り中 <b>${p}</b>件`);
+  if(e.length) parts.push(`<span class="err">エラー ${e.length}件</span>`);
+  if(q && !p) parts.push('<span class="warn">（ノートPCの読み取りが動いていれば数分で終わります）</span>');
+  if(store.lastOcrAt) parts.push(`最終読み取り ${fmtDT(store.lastOcrAt)}`);
+  st.innerHTML=parts.join('　');
+  document.getElementById('ocrJobs').innerHTML=e.map(j=>`<div class="ocr-row">
+      <div><span class="err">エラー</span> ${eh(j.filename||'')}<div class="rm">${eh(j.error||'')}</div></div>
+      <div class="rac">
+        <button class="btn bo bsm" onclick="retryJob('${ea(j.id)}')">再読み取り</button>
+        <button class="btn bd2" onclick="deleteJob('${ea(j.id)}')">削除</button>
+      </div></div>`).join('');
+}
+function fmtDT(iso){ const d=new Date(iso); return `${d.getMonth()+1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`; }
+async function retryJob(id){
+  try{ await api('PATCH','?id='+encodeURIComponent(id),{ status:'queued' }); toast('再読み取りを依頼しました'); }
+  catch(e){ toast('⚠ '+e.message); }
+  syncJobs(false);
+}
+async function deleteJob(id){
+  if(!confirm('この写真の読み取りを削除しますか？')) return;
+  try{ await api('DELETE','?id='+encodeURIComponent(id)); }catch(e){ toast('⚠ '+e.message); }
+  syncJobs(false);
+}
+
+function draftWarnCount(d){
+  const k=d.data||{};
+  return (k.uncertain||[]).length + (k.client_confidence==='low'?1:0) + (!k.client_name?1:0);
+}
+function renderDrafts(){
+  const el=document.getElementById('draftList');
+  if(!store.drafts.length){ el.innerHTML=''; return; }
+  el.innerHTML=`<div class="ocr-st"><b>下書き ${store.drafts.length}件</b>（開いて確認 → 「カルテを生成する」で保存）</div>`+
+    store.drafts.map(d=>{
+      const w=draftWarnCount(d);
+      return `<div class="ocr-row"${d.id===curDraftId?' style="border-color:var(--p)"':''}>
+        <div><strong>${eh(d.data.client_name||'（名前不明）')}</strong>
+          <div class="rm">${eh(d.date)}${w?` ／ <span class="warn">要確認 ${w}</span>`:''}${d.id===curDraftId?' ／ 編集中':''}</div></div>
+        <div class="rac"><button class="btn bp bsm" onclick="openDraft('${ea(d.id)}')">開く</button></div>
+      </div>`;
+    }).join('');
+}
+
+// プリセットの並びに差分を当てる（AI には差分だけを読ませ、展開はここで決定的に行う）
+function resolveWarmup(presetItems, changes){
+  const items=(presetItems||[]).map(n=>({ name:n, value:null }));
+  const warns=[];
+  const idx=n=>items.findIndex(x=>norm(x.name)===norm(n));
+  (changes||[]).forEach(c=>{
+    if(!c||!c.op) return;
+    if(c.op==='replace'){
+      const i=idx(c.from);
+      if(i<0){ warns.push(`WU：「${c.from}」がプリセットに無いため「${c.to}」を末尾に追加しました`); items.push({name:c.to,value:c.value||null}); }
+      else items[i]={ name:c.to, value:c.value||null };
+    } else if(c.op==='remove'){
+      const i=idx(c.name);
+      if(i<0) warns.push(`WU：削除指定の「${c.name}」がプリセットに見つかりません`);
+      else items.splice(i,1);
+    } else if(c.op==='add'){
+      const i=c.after?idx(c.after):-1;
+      if(c.after && i<0) warns.push(`WU：「${c.after}」が見つからないため「${c.name}」を末尾に追加しました`);
+      if(i<0) items.push({name:c.name,value:c.value||null}); else items.splice(i+1,0,{name:c.name,value:c.value||null});
+    } else if(c.op==='modify'){
+      const i=idx(c.name);
+      if(i<0){ warns.push(`WU：「${c.name}」がプリセットに無いため末尾に追加しました`); items.push({name:c.name,value:c.value||null}); }
+      else items[i].value=c.value||null;
+    }
+  });
+  return { items, warns };
+}
+
+function openDraft(id){
+  const d=store.drafts.find(x=>x.id===id); if(!d) return;
+  const dirty=(TRL.length||CRL.length||SRL.length||document.getElementById('clientName').value.trim()) && curDraftId!==id;
+  if(dirty && !curDraftId && !confirm('入力中の内容を破棄して下書きを開きますか？')) return;
+  clearForm();
+  applyDraft(d);
+  renderDrafts();
+  window.scrollTo({ top:document.getElementById('draftBar').offsetTop-10, behavior:'smooth' });
+}
+
+function applyDraft(d){
+  const k=d.data||{};
+  const notes=[];
+  curDraftId=d.id;
+
+  // 顧客
+  const names=Object.keys(store.clients);
+  const hit=k.client_name?findByName(names,k.client_name,x=>x):null;
+  const cname=hit||k.client_name||'';
+  document.getElementById('clientName').value=cname;
+  applyClient(cname);
+  if(!cname) notes.push('顧客名が読み取れませんでした');
+  else if(!hit) notes.push(`「${cname}」は未登録の顧客です（新規として登録されます）`);
+  if(k.client_confidence==='low') notes.push('顧客名の読み取りに自信がありません');
+  document.getElementById('sessionDate').value=d.date||today();
+
+  // ウォームアップ（プリセット＋差分）→ トレーニングの前半
+  const wu=k.warmup||{};
+  const client=store.clients[cname];
+  let pname=wu.preset||(client&&client.wuPreset)||null;
+  let preset=pname?findByName(store.trainPresets,pname):null;
+  if(wu.preset && !preset) notes.push(`WUプリセット「${wu.preset}」が登録されていません`);
+  if(!wu.preset && preset) notes.push(`WUプリセットの記載が無いため、いつもの「${preset.name}」を使いました`);
+  if(preset){ pname=preset.name; curWuPreset=preset.name; }
+  const usedNames=new Set();
+  const uniq=n=>{ let x=n, i=2; while(usedNames.has(x)) x=`${n} (${i++})`; usedNames.add(x); return x; };
+  if(preset || (wu.changes||[]).length){
+    const r=resolveWarmup(preset?preset.items.map(i=>i.name):[], wu.changes);
+    notes.push(...r.warns);
+    r.items.forEach(it=>{
+      const name=uniq(canonTrain(it.name));
+      addTBlock(name,'free',!store.trainAssets.find(a=>a.name===name));
+      const row=TRL[TRL.length-1];
+      document.getElementById('v_'+row.rowId).value=it.value||`WU（${pname||'プリセット'}）通り`;
+    });
+  }
+
+  // トレーニング
+  (k.training||[]).forEach(t=>{
+    if(!t||!t.name) return;
+    const name=uniq(canonTrain(t.name));
+    const asset=store.trainAssets.find(a=>a.name===name);
+    const sets=(t.sets||[]).filter(s=>s&&(s.kg!=null||s.reps!=null||s.sets!=null));
+    const type=sets.length?'structured':'free';
+    if(asset && asset.type!==type) notes.push(`「${name}」は${asset.type==='structured'?'kg/reps/sets':'フリー'}形式の種目ですが、ノートの書き方に合わせて${type==='structured'?'kg/reps/sets':'フリー'}で入れました`);
+    addTBlock(name,type,!asset);
+    const row=TRL[TRL.length-1];
+    if(type==='structured'){
+      sets.forEach((s,i)=>{
+        if(i>0) addSetRow(row.rowId);
+        const sid=row.setIds[i];
+        if(s.kg!=null) document.getElementById(sid+'_kg').value=s.kg;
+        if(s.reps!=null) document.getElementById(sid+'_rep').value=s.reps;
+        if(s.sets!=null) document.getElementById(sid+'_set').value=s.sets;
+      });
+    } else {
+      document.getElementById('v_'+row.rowId).value=t.text||'';
+    }
+  });
+  const newNames=TRL.filter(r=>!store.trainAssets.find(a=>a.name===r.key)).map(r=>r.key);
+  if(newNames.length) notes.push('新しい種目（保存時に登録）：'+newNames.join('、'));
+
+  // 体調・メモ → セッション詳細
+  document.getElementById('sessionBlocks').innerHTML=''; SBL=[];
+  const addBlock=(t,c)=>{ addSBlock(); const b=SBL[SBL.length-1]; document.getElementById(b+'_t').value=t; document.getElementById(b+'_c').value=c; };
+  if(k.condition) addBlock('体調',k.condition);
+  if(k.notes) addBlock('メモ',k.notes);
+  if(!SBL.length) addSBlock();
+
+  notes.push(...(k.uncertain||[]).map(u=>'読み取り：'+u));
+  renderDraftBar(d,notes);
+  document.activeElement && document.activeElement.blur && document.activeElement.blur();
+}
+function canonTrain(n){ const a=findByName(store.trainAssets,n); return a?a.name:String(n).trim(); }
+
+function renderDraftBar(d,notes){
+  const bar=document.getElementById('draftBar');
+  if(!d){ bar.classList.remove('show'); return; }
+  document.getElementById('draftTitle').textContent=`下書きを編集中：${d.data.client_name||'（名前不明）'} ${d.date}`;
+  document.getElementById('draftNotes').innerHTML=(notes&&notes.length)
+    ?`<ul>${notes.map(n=>`<li>${eh(n)}</li>`).join('')}</ul>`
+    :'<div style="margin-top:4px">要確認の項目はありません。内容を見て「カルテを生成する」で保存してください。</div>';
+  bar.classList.add('show');
+}
+function finishDraft(id){
+  store.drafts=store.drafts.filter(x=>x.id!==id);
+  save();
+  curDraftId=null; renderDraftBar(null); renderDrafts();
+}
+function discardDraft(){
+  if(!curDraftId) return;
+  if(!confirm('この下書きを破棄しますか？（元に戻せません）')) return;
+  finishDraft(curDraftId);
+  clearForm(); addSBlock();
+  toast('下書きを破棄しました');
+}
+function showNextDraftHint(){
+  setTimeout(()=>toast(`📝 下書きが残り${store.drafts.length}件あります`),2800);
+}
+
+// ─── バックアップ（URL・端末の移行用）───
+function exportBackup(){
+  const data=JSON.stringify({ app:'training_karte', version:2, exported_at:new Date().toISOString(), store },null,2);
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([data],{type:'application/json'}));
+  a.download=`karte_backup_${df(today())}.json`; a.click(); URL.revokeObjectURL(a.href);
+  toast('⬇ 全データを書き出しました');
+}
+function importBackup(input){
+  const f=input.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{
+    try{
+      const j=JSON.parse(r.result);
+      const s=j.store||j;
+      if(!s || typeof s!=='object' || !('records' in s)) throw new Error('カルテのバックアップではありません');
+      const merge=(dst,src,key)=>(src||[]).forEach(x=>{ if(!dst.find(y=>key(y)===key(x))) dst.push(x); });
+      Object.entries(s.clients||{}).forEach(([n,c])=>{ store.clients[n]=Object.assign({},c,store.clients[n]); });
+      merge(store.checkAssets,s.checkAssets,x=>x.name);
+      merge(store.trainAssets,s.trainAssets,x=>x.name);
+      merge(store.trainPresets,s.trainPresets,x=>x.name);
+      merge(store.records,s.records,x=>x.id);
+      merge(store.drafts,s.drafts,x=>x.id);
+      store.records.sort((a,b)=>b.date.localeCompare(a.date));
+      save(); refreshCDL(); refreshADL(); renderRecs(); renderDrafts();
+      toast('⬆ バックアップを読み込みました');
+    }catch(e){ alert('読み込めませんでした: '+e.message); }
+    input.value='';
+  };
+  r.readAsText(f);
+}
+
 init();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/karte-MD-NBLM/sw.js')
+    navigator.serviceWorker.register('sw.js')
       .catch(() => {});
   });
 }

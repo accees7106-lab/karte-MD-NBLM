@@ -1,8 +1,5 @@
-const CACHE = 'karte-v1';
-const ASSETS = [
-  '/karte-MD-NBLM/',
-  '/karte-MD-NBLM/index.html'
-];
+const CACHE = 'karte-v2';
+const ASSETS = ['./', './index.html', './vendor/Sortable.min.js'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -20,6 +17,9 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  // API はキャッシュしない（読み取り結果は常に最新を取りに行く）
+  if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
   e.respondWith(
     caches.match(e.request).then(cached => {
       const network = fetch(e.request).then(res => {
