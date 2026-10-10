@@ -380,6 +380,24 @@ async function step(name, fn) {
     assert.match(text, /■ RDL\n■ チェストオープナー\n■ ローリング\n  左右10回/);
   });
 
+  await step('セッション詳細が空欄でも出力できる（空のブロックは出さない）', async () => {
+    await page.evaluate(() => {
+      clearForm();
+      document.getElementById('clientName').value = '空欄テスト2';
+      document.getElementById('sessionDate').value = '2026-10-12';
+      addTBlock('RDL', 'free', false);
+      addSBlock(); addSBlock();
+    });
+    await page.fill('#sessionBlocks .sbl:nth-child(2) input', '肩周り');   // タイトルだけで中身が空
+    await page.click('.btn-gen');
+    await page.waitForSelector('#resultArea:not(.ph)');
+    assert.equal(await page.isVisible('#errOverlay.open'), false);
+    const rec = (await store(page)).records.find(r => r.id === '20261012_空欄テスト2');
+    assert.ok(rec);
+    assert.doesNotMatch(rec.content, /セッション詳細・所感/);
+    assert.doesNotMatch(await page.textContent('#sessionText'), /セッション詳細・所感/);
+  });
+
   assert.deepEqual(errors, []);
   await ctx.close();
 }

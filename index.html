@@ -928,10 +928,7 @@ function generateKarte() {
       errs.push(`整体メニュー ${idx+1}行目の内容を入力してください`);
   });
   // トレーニングの詳細（kg/reps/sets・フリー入力）は空欄でもよい（種目名だけ残す）
-  SBL.forEach((bid,idx)=>{
-    if(!(document.getElementById(bid+'_c')?.value||'').trim())
-      errs.push(`セッション詳細 ブロック${idx+1}の内容を入力してください`);
-  });
+  // セッション詳細も空欄でよい（中身の無いブロックは出力しない）
   if(errs.length){
     const ul=document.getElementById('errList');
     ul.innerHTML=errs.map(e=>`<li>${eh(e)}</li>`).join('');
