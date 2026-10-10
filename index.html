@@ -1431,7 +1431,8 @@ function renderDrafts(){
       return `<div class="ocr-row"${d.id===curDraftId?' style="border-color:var(--p)"':''}>
         <div><strong>${eh(d.data.client_name||'（名前不明）')}</strong>
           <div class="rm">${eh(d.date)}${w?` ／ <span class="warn">要確認 ${w}</span>`:''}${d.id===curDraftId?' ／ 編集中':''}</div></div>
-        <div class="rac"><button class="btn bp bsm" onclick="openDraft('${ea(d.id)}')">開く</button></div>
+        <div class="rac"><button class="btn bp bsm" onclick="openDraft('${ea(d.id)}')">開く</button>
+          <button class="btn bd2" onclick="deleteDraft('${ea(d.id)}')" title="開かずに削除">削除</button></div>
       </div>`;
     }).join('');
 }
@@ -1753,6 +1754,17 @@ function discardDraft(){
   flushFeedback();
   clearForm(); addSBlock();
   toast('下書きを破棄しました');
+}
+// 一覧から、開かずに下書きを消す（写真が片付いたことは、破棄と同じく学習側へ伝える）
+function deleteDraft(id){
+  const d=store.drafts.find(x=>x.id===id); if(!d) return;
+  if(!confirm(`下書き「${d.data.client_name||'（名前不明）'} ${d.date}」を削除しますか？（元に戻せません）`)) return;
+  const current=id===curDraftId;
+  queueFeedback(id, null, null, current?curExtra:[]);   // 消す前に送る（同じ写真の下書きが他に残っているかで判断するため）
+  if(current){ finishDraft(id); clearForm(); addSBlock(); }
+  else { store.drafts=store.drafts.filter(x=>x.id!==id); save(); renderDrafts(); }
+  flushFeedback();
+  toast('下書きを削除しました');
 }
 function showNextDraftHint(){
   setTimeout(()=>toast(`📝 下書きが残り${store.drafts.length}件あります`),2800);

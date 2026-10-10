@@ -340,6 +340,25 @@ async function step(name, fn) {
     assert.equal((await store(page)).localAliases.length, before - 1);
   });
 
+  await step('一覧の「削除」で、開かずに下書きを消せる（写真の最後の下書きなら片付いたことを送る）', async () => {
+    const job = 'eeeeeeee-0000-0000-0000-000000000001';
+    const mk = i => ({ id: `${job}_${i}`, jobId: job, date: '2026-10-11', data: { client_name: `削除テスト${i}`, warmup: { preset: null, changes: [] }, training: [], uncertain: [] } });
+    await inject([mk(0), mk(1)]);
+    const before = api.feedback.length;
+    const current = await page.evaluate(() => curDraftId);
+    const row = n => page.locator('#draftList .ocr-row', { hasText: n });
+    await row('削除テスト0').locator('button', { hasText: '削除' }).click();
+    assert.equal(await row('削除テスト0').count(), 0);
+    assert.equal(await page.evaluate(() => curDraftId), current);           // 開いている下書きはそのまま
+    await feedbackSent();
+    assert.equal(api.feedback.length, before);                                // 同じ写真の下書きがまだ残る → 何も送らない
+    await row('削除テスト1').locator('button', { hasText: '削除' }).click();
+    await feedbackSent();
+    assert.equal(api.feedback.length, before + 1);
+    assert.deepEqual([api.feedback[before].job_id, api.feedback[before].last, api.feedback[before].diffs], [job, true, []]);
+    assert.ok(!(await store(page)).drafts.some(d => d.jobId === job));
+  });
+
   assert.deepEqual(errors, []);
   await ctx.close();
 }
