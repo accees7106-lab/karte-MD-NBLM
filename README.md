@@ -105,7 +105,7 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 4. `.env` を作り、`GITHUB_TOKEN` を貼ってもらう（入力は画面に出ない。保存先はあなただけが読めるファイル）。
 5. `python worker.py --check` で、トークン・Vault への接続・`claude -p` の呼び出し（サブスクのログイン）を確認する。問題があれば理由を表示して止まる。
 6. `python worker.py --once` を1回動かす（すでに溜まっている写真があれば、このとき読み取る）。
-7. ログオン時に自動で起動するタスク `KarteOcrWorker` を登録するか尋ねる。ログは `ocr-worker.log`。
+7. ログオン時に自動で起動するタスク `KarteOcrWorker` を登録するか尋ねる。ログは `ocr-worker.log`（UTF-8。読むときは `Get-Content .\ocr-worker.log -Tail 20 -Encoding UTF8`）。
 
 - 前もって必要なのは、Claude Code にログインしておくこと（`claude` を起動して `/login`）と、GitHub のトークン（手順 1）だけ。
 - **今使っているカルテの画面は変更しない。** このスクリプトは、この PC でワーカーを動かす準備だけを行う。

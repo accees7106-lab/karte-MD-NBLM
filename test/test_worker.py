@@ -417,6 +417,16 @@ class VaultTest(VaultTestCase):
                 if v is not None:
                     os.environ[k] = v
 
+    def test_log_file_is_written_in_utf8(self):
+        path = os.path.join(self.tmp, "w.log")
+        os.environ["KARTE_LOG"] = path
+        try:
+            worker.log("起動（30秒ごとに確認）")
+        finally:
+            os.environ.pop("KARTE_LOG", None)
+        with open(path, "rb") as f:
+            self.assertIn("起動（30秒ごとに確認）".encode("utf-8"), f.read())
+
     def test_check_env(self):
         env = dict(os.environ)
         try:
