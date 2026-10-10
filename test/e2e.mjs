@@ -359,6 +359,27 @@ async function step(name, fn) {
     assert.ok(!(await store(page)).drafts.some(d => d.jobId === job));
   });
 
+  await step('トレーニングの詳細が空欄でも出力できる（種目名は残る）', async () => {
+    await page.evaluate(() => {
+      clearForm();
+      document.getElementById('clientName').value = '空欄テスト';
+      addTBlock('RDL', 'structured', false);          // セットの行はあるが値は空
+      addTBlock('チェストオープナー', 'free', false);  // フリー入力も空
+      addTBlock('ローリング', 'free', false);
+      document.getElementById('v_' + TRL[2].rowId).value = '左右10回';
+      addSBlock();
+    });
+    await page.fill('#sessionBlocks textarea', '確認用');
+    await page.click('.btn-gen');
+    await page.waitForSelector('#resultArea:not(.ph)');
+    assert.equal(await page.isVisible('#errOverlay.open'), false);
+    const md = (await store(page)).records[0].content;
+    const tm = JSON.parse(md.split('---json\n')[1].split('\n---')[0]).training_menu;
+    assert.deepEqual(tm, { RDL: '', チェストオープナー: '', ローリング: '左右10回' });
+    const text = await page.textContent('#menuText');
+    assert.match(text, /■ RDL\n■ チェストオープナー\n■ ローリング\n  左右10回/);
+  });
+
   assert.deepEqual(errors, []);
   await ctx.close();
 }

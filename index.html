@@ -927,20 +927,7 @@ function generateKarte() {
     if(!(document.getElementById('v_'+id)?.value||'').trim())
       errs.push(`整体メニュー ${idx+1}行目の内容を入力してください`);
   });
-  TRL.forEach(({key,rowId,type,setIds})=>{
-    if(type==='structured'){
-      setIds.forEach((sid,idx)=>{
-        const kg=(document.getElementById(sid+'_kg')?.value||'').trim();
-        const rep=(document.getElementById(sid+'_rep')?.value||'').trim();
-        const set=(document.getElementById(sid+'_set')?.value||'').trim();
-        if(!kg&&!rep&&!set) errs.push(`トレーニング「${key}」セット${idx+1}に値を入力してください`);
-      });
-      if(!setIds.length) errs.push(`トレーニング「${key}」にセットを追加してください`);
-    } else {
-      if(!(document.getElementById('v_'+rowId)?.value||'').trim())
-        errs.push(`トレーニング「${key}」の内容を入力してください`);
-    }
-  });
+  // トレーニングの詳細（kg/reps/sets・フリー入力）は空欄でもよい（種目名だけ残す）
   SBL.forEach((bid,idx)=>{
     if(!(document.getElementById(bid+'_c')?.value||'').trim())
       errs.push(`セッション詳細 ブロック${idx+1}の内容を入力してください`);
@@ -989,10 +976,9 @@ function generateKarte() {
         if(set) t.push(set+'sets');
         if(t.length) parts.push(t.join(' '));
       });
-      if(parts.length) tm[key]=parts.join(' / ');
+      tm[key]=parts.join(' / ');   // 空欄なら ""（種目は残す）
     } else {
-      const v=(document.getElementById('v_'+rowId)?.value||'').trim();
-      if(v) tm[key]=v;
+      tm[key]=(document.getElementById('v_'+rowId)?.value||'').trim();
     }
   });
 
@@ -1080,7 +1066,7 @@ function buildMenuText(cm, sm, tm) {
     lines.push('【トレーニングメニュー】');
     Object.entries(tm).forEach(([name,val])=>{
       lines.push('■ '+name);
-      lines.push('  '+val);
+      if(val) lines.push('  '+val);
     });
     lines.push('');
   }
