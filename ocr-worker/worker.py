@@ -503,11 +503,18 @@ def fmt_context(ctx):
 DIFF_LABELS = {
     "client_name": "顧客名", "date": "日付", "condition": "体調", "notes": "メモ",
     "train_value": "種目の内容", "train_removed": "削除された種目", "train_added": "追加された種目",
-    "train_order": "種目の順番", "block": "セッション詳細",
+    "train_order": "種目の順番", "block": "セッション詳細", "train_renamed": "種目名",
 }
+KIND_LABELS = {"client": "顧客名", "exercise": "種目名", "preset": "WUプリセット名", "other": "その他"}
 
 
 def fmt_diff(d):
+    # トレーナーが黄色の枠で明示した訂正（書き方の対応・文章の指摘）は、AI の推測より確かな情報
+    if d.get("field") == "alias":
+        kind = KIND_LABELS.get(d.get("name"), "その他")
+        return f"【トレーナーの指定】{kind}「{d.get('ai')}」と書かれていたら「{d.get('final')}」と読む"
+    if d.get("field") == "hint":
+        return f"【トレーナーの指摘】{d.get('name') or ''} → {d.get('final')}"
     label = DIFF_LABELS.get(d.get("field"), d.get("field") or "?")
     name = f"「{d['name']}」" if d.get("name") else ""
 
@@ -732,6 +739,7 @@ CONSOLIDATE_PROMPT = """あなたは、パーソナルジムのトレーナー�
 3. それ以外の傾向は rules に、読み取り AI がそのまま守れる具体的な指示として短い日本語で書く。
    読み取り AI の出力項目は client_name / date / condition / warmup(preset, changes) / training(name, sets[kg, reps, sets], text) / notes / uncertain。規則で項目に触れるときはこの名前を使う。
 4. 単なる内容の追記（AI の読み違いではなく、トレーナーが後から書き足しただけ）は学習しない。
+5. 【トレーナーの指定】（書き方の対応）は必ず aliases に入れる。【トレーナーの指摘】（文章）は、写真と見比べて、次回から守れる一般的な規則に直して rules に入れる。どちらも推測より優先する。
 
 ## 忘れないためのルール（厳守）
 - 既存の rules と aliases は、新しい訂正と矛盾しない限り**すべてそのまま残す**。言い換えて短くまとめるのはよいが、意味を落とさない。
@@ -755,6 +763,17 @@ def fmt_case(i, fb, image):
     diffs = "\n".join("  - " + fmt_diff(d) for d in fb.get("diffs") or [])
     img = f"写真: {image}" if image else "写真: （残っていない。テキストだけで判断する）"
     return f"### ケース{i}\n{img}\nAI の読み取り: {draft}\n訂正後: {final}\n差分:\n{diffs}"
+
+
+def explicit_aliases(feedback):
+    """黄色の枠でトレーナーが指定した「書かれ方 → 正しい表記」。要約の結果に関係なく、必ず対応表に入れる。"""
+    out = []
+    for fb in feedback:
+        for d in fb.get("diffs") or []:
+            if d.get("field") == "alias" and _str(d.get("ai")) and _str(d.get("final")):
+                kind = d.get("name") if d.get("name") in KIND_LABELS else "other"
+                out.append({"written": _str(d["ai"]), "correct": _str(d["final"]), "kind": kind})
+    return out
 
 
 def merge_memory(old, new):
@@ -803,6 +822,7 @@ def consolidate(sb):
         if isinstance(new, str):
             new = extract_json(new)
         merged = merge_memory(old, new)
+        merged = merge_memory(merged, {"rules": merged["rules"], "aliases": explicit_aliases(pending)})
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     version = (old.get("version") or 0) + 1

@@ -216,6 +216,14 @@
     .draft-bar.show{display:block}
     .draft-bar ul{margin:6px 0 0 18px}
     .draft-bar-hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .draft-bar li{margin-bottom:6px}
+    .draft-bar li.done>.ntext{color:#15803d}
+    .fix{display:flex;align-items:center;gap:6px;margin:4px 0 2px;flex-wrap:wrap}
+    .fix input,.fix select{flex:1;min-width:140px;width:auto;padding:5px 8px;font-size:.84rem;background:#fff}
+    .fix .btn{flex-shrink:0}
+    .fix-ok{color:#15803d;font-weight:600;font-size:.82rem;margin-top:2px}
+    details.manual{margin-top:8px}
+    details.manual summary{cursor:pointer;font-weight:700}
     details.cfg{margin-top:10px;font-size:.85rem}
     details.cfg summary{cursor:pointer;color:var(--mu);font-weight:600}
     details.cfg .fg{margin-top:9px}
@@ -533,10 +541,11 @@ function loadStore() {
     if (!s.importedJobs)   s.importedJobs = [];
     if (!s.pendingFeedback) s.pendingFeedback = [];
     if (!s.pendingRecords)  s.pendingRecords = [];
+    if (!s.localAliases)    s.localAliases = [];
     return s;
   } catch { return ns(); }
 }
-function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[], drafts:[], importedJobs:[], pendingFeedback:[], pendingRecords:[] }; }
+function ns() { return { clients:{}, checkAssets:[], trainAssets:[], trainPresets:[], records:[], drafts:[], importedJobs:[], pendingFeedback:[], pendingRecords:[], localAliases:[] }; }
 function save() {
   try { localStorage.setItem(SK, JSON.stringify(store)); }
   catch { toast('⚠ 保存領域が不足しています'); }
@@ -568,6 +577,8 @@ let CRL=[], SRL=[], TRL=[], SBL=[];
 let cRItems=[], tRType='structured';
 let curMd=null, curFn=null;
 let curDraftId=null, curWuPreset=null, curSnap=null;
+// 黄色の枠：読み取りの解釈（curNotes）と、そこで指定した訂正（curExtra。保存時に学習へ送る）
+let curNotes=[], curExtra=[], curWuRows=[], curDraftData=null, manualOpen=false;
 let _uid=0;
 function uid(pre){ return pre+Date.now().toString(36)+'_'+(++_uid); }
 const DH='<span class="dh" title="ドラッグで並べ替え">⠿</span>';
@@ -1024,7 +1035,7 @@ function generateKarte() {
   curWuPreset=null;  // 次のカルテ（別の顧客かもしれない）に持ち越さない
   TRL.forEach(r=>{ if(!store.trainAssets.find(a=>a.name===r.key)) store.trainAssets.push({name:r.key,type:r.type}); });
   refreshADL();
-  if(curDraftId){ queueFeedback(curDraftId, curSnap, snapForm()); finishDraft(curDraftId); flushFeedback(); }
+  if(curDraftId){ queueFeedback(curDraftId, curSnap, snapForm(), curExtra); finishDraft(curDraftId); flushFeedback(); }
   const recId=df(date)+'_'+cname;
   store.records=store.records.filter(r=>r.id!==recId);
   store.records.unshift({id:recId,clientName:cname,date,totalSessions:sess,content:md});
@@ -1220,7 +1231,9 @@ function resetForm(){
   toast('リセットしました');
 }
 function clearForm(){
-  curDraftId=null; curWuPreset=null; curSnap=null; renderDraftBar(null);
+  curDraftId=null; curWuPreset=null; curSnap=null;
+  curNotes=[]; curExtra=[]; curWuRows=[]; curDraftData=null; manualOpen=false;
+  renderDraftBar(null);
   document.getElementById('clientName').value='';
   document.getElementById('sessionDate').value=today();
   document.getElementById('totalSessions').value='1';
@@ -1461,10 +1474,31 @@ function openDraft(id){
   window.scrollTo({ top:document.getElementById('draftBar').offsetTop-10, behavior:'smooth' });
 }
 
+// 事例（黄色の枠の1項目）。type: client / preset / newex / text / info
+function N(type,text,data){ return Object.assign({ type, text, done:false, result:'' }, data||{}); }
+function makeUniq(used){ return n=>{ let x=n, i=2; while(used.has(x)) x=`${n} (${i++})`; used.add(x); return x; }; }
+
+// WU（プリセット＋差分）を展開して、トレーニングに追加する。追加した行の id と注意を返す
+function expandWarmup(preset, changes, uniq){
+  const ids=[], warns=[];
+  if(!preset && !(changes||[]).length) return { ids, warns };
+  const pname=preset?preset.name:null;
+  const r=resolveWarmup(preset?preset.items.map(i=>i.name):[], changes);
+  warns.push(...r.warns);
+  r.items.forEach(it=>{
+    const name=uniq(canonTrain(it.name));
+    addTBlock(name,'free',!store.trainAssets.find(a=>a.name===name));
+    const row=TRL[TRL.length-1];
+    document.getElementById('v_'+row.rowId).value=it.value||`WU（${pname||'プリセット'}）通り`;
+    ids.push(row.rowId);
+  });
+  return { ids, warns };
+}
+
 function applyDraft(d){
   const k=d.data||{};
   const notes=[];
-  curDraftId=d.id;
+  curDraftId=d.id; curDraftData=k;
 
   // 顧客
   const names=Object.keys(store.clients);
@@ -1472,9 +1506,11 @@ function applyDraft(d){
   const cname=hit||k.client_name||'';
   document.getElementById('clientName').value=cname;
   applyClient(cname);
-  if(!cname) notes.push('顧客名が読み取れませんでした');
-  else if(!hit) notes.push(`「${cname}」は未登録の顧客です（新規として登録されます）`);
-  if(k.client_confidence==='low') notes.push('顧客名の読み取りに自信がありません');
+  const cm=[];
+  if(!cname) cm.push('顧客名が読み取れませんでした');
+  else if(!hit) cm.push(`「${cname}」は未登録の顧客です（新規として登録されます）`);
+  if(k.client_confidence==='low') cm.push('顧客名の読み取りに自信がありません');
+  if(cm.length) notes.push(N('client', cm.join('／'), { written:k.client_name||'' }));
   document.getElementById('sessionDate').value=d.date||today();
 
   // ウォームアップ（プリセット＋差分）→ トレーニングの前半
@@ -1482,21 +1518,13 @@ function applyDraft(d){
   const client=store.clients[cname];
   let pname=wu.preset||(client&&client.wuPreset)||null;
   let preset=pname?(findByName(store.trainPresets,pname)||findByName(store.trainPresets,aliasOf('preset',pname))):null;
-  if(wu.preset && !preset) notes.push(`WUプリセット「${wu.preset}」が登録されていません`);
-  if(!wu.preset && preset) notes.push(`WUプリセットの記載が無いため、いつもの「${preset.name}」を使いました`);
+  if(wu.preset && !preset) notes.push(N('preset', `WUプリセット「${wu.preset}」が登録されていません`, { written:wu.preset }));
+  if(!wu.preset && preset) notes.push(N('preset', `WUプリセットの記載が無いため、いつもの「${preset.name}」を使いました`, { written:'' }));
   if(preset){ pname=preset.name; curWuPreset=preset.name; }
-  const usedNames=new Set();
-  const uniq=n=>{ let x=n, i=2; while(usedNames.has(x)) x=`${n} (${i++})`; usedNames.add(x); return x; };
-  if(preset || (wu.changes||[]).length){
-    const r=resolveWarmup(preset?preset.items.map(i=>i.name):[], wu.changes);
-    notes.push(...r.warns);
-    r.items.forEach(it=>{
-      const name=uniq(canonTrain(it.name));
-      addTBlock(name,'free',!store.trainAssets.find(a=>a.name===name));
-      const row=TRL[TRL.length-1];
-      document.getElementById('v_'+row.rowId).value=it.value||`WU（${pname||'プリセット'}）通り`;
-    });
-  }
+  const uniq=makeUniq(new Set());
+  const w=expandWarmup(preset, wu.changes, uniq);
+  curWuRows=w.ids;
+  notes.push(...w.warns.map(t=>N('text',t)));
 
   // トレーニング
   (k.training||[]).forEach(t=>{
@@ -1505,7 +1533,7 @@ function applyDraft(d){
     const asset=store.trainAssets.find(a=>a.name===name);
     const sets=(t.sets||[]).filter(s=>s&&(s.kg!=null||s.reps!=null||s.sets!=null));
     const type=sets.length?'structured':'free';
-    if(asset && asset.type!==type) notes.push(`「${name}」は${asset.type==='structured'?'kg/reps/sets':'フリー'}形式の種目ですが、ノートの書き方に合わせて${type==='structured'?'kg/reps/sets':'フリー'}で入れました`);
+    if(asset && asset.type!==type) notes.push(N('info', `「${name}」は${asset.type==='structured'?'kg/reps/sets':'フリー'}形式の種目ですが、ノートの書き方に合わせて${type==='structured'?'kg/reps/sets':'フリー'}で入れました`));
     addTBlock(name,type,!asset);
     const row=TRL[TRL.length-1];
     if(type==='structured'){
@@ -1521,7 +1549,8 @@ function applyDraft(d){
     }
   });
   const newNames=TRL.filter(r=>!store.trainAssets.find(a=>a.name===r.key)).map(r=>r.key);
-  if(newNames.length) notes.push('新しい種目（保存時に登録）：'+newNames.join('、'));
+  if(newNames.length) notes.push(N('newex', '新しい種目（保存時に登録）：'+newNames.join('、')+'。読み違いなら、正しい種目名に直せます',
+    { items:newNames.map(n=>({ name:n, done:false, result:'' })) }));
 
   // 体調・メモ → セッション詳細
   document.getElementById('sessionBlocks').innerHTML=''; SBL=[];
@@ -1530,8 +1559,9 @@ function applyDraft(d){
   if(k.notes) addBlock('メモ',k.notes);
   if(!SBL.length) addSBlock();
 
-  notes.push(...(k.uncertain||[]).map(u=>'読み取り：'+u));
-  renderDraftBar(d,notes);
+  notes.push(...(k.uncertain||[]).map(u=>N('text','読み取り：'+u)));
+  curNotes=notes;
+  renderDraftBar(d);
   curSnap=snapForm();  // AI の読み取りをそのまま入れた状態（保存時にこれとの差分を学習に送る）
   document.activeElement && document.activeElement.blur && document.activeElement.blur();
 }
@@ -1541,19 +1571,174 @@ function canonTrain(n){
 }
 // 学習した対応表（書かれ方 → 正しい表記）。該当が無ければ null
 function aliasOf(kind,written){
+  const loc=(store.localAliases||[]).find(x=>x.kind===kind && norm(x.written)===norm(written));
+  if(loc) return loc.correct;
   const list=(store.ocrMemory&&store.ocrMemory.memory&&store.ocrMemory.memory.aliases)||[];
   const a=list.find(x=>x.kind===kind && norm(x.written)===norm(written));
   return a?a.correct:null;
 }
 
-function renderDraftBar(d,notes){
+function curDraftObj(){ return store.drafts.find(x=>x.id===curDraftId)||null; }
+const KIND_LABEL={ client:'顧客名', exercise:'種目名', preset:'WUプリセット名', other:'その他' };
+
+function noteControl(n,i){
+  const ok=t=>`<div class="fix-ok">✓ ${eh(t)}</div>`;
+  if(n.type==='client'){
+    if(n.done) return ok(n.result);
+    return `<div class="fix"><input type="text" id="nt_${i}" list="clientList" placeholder="正しい顧客名" autocomplete="off">
+      <button class="btn bo bsm" onclick="fixClient(${i})">直す</button></div>`;
+  }
+  if(n.type==='preset'){
+    if(n.done) return ok(n.result);
+    if(!store.trainPresets.length) return '<div class="hint">プリセットが未登録です（トレーニングメニューの「＋ 現在の構成を保存」で登録できます）</div>';
+    return `<div class="fix"><select id="nt_${i}">${store.trainPresets.map(p=>`<option value="${ea(p.name)}">${eh(p.name)}</option>`).join('')}</select>
+      <button class="btn bo bsm" onclick="fixPreset(${i})">このプリセットで作り直す</button></div>`;
+  }
+  if(n.type==='newex'){
+    return n.items.map((it,j)=>it.done?ok(it.result):`<div class="fix"><span class="ktag">${eh(it.name)}</span>
+      <input type="text" id="nt_${i}_${j}" list="trainDL" placeholder="正しい種目名（合っていれば空欄）" autocomplete="off">
+      <button class="btn bo bsm" onclick="fixExercise(${i},${j})">直す／このまま</button></div>`).join('');
+  }
+  if(n.type==='text'){
+    if(n.done) return ok('記録しました：'+n.result);
+    return `<div class="fix"><input type="text" id="nt_${i}" placeholder="正しい内容（例: 2セット目は 45kg）" autocomplete="off">
+      <button class="btn bo bsm" onclick="fixHint(${i})">記録</button></div>`;
+  }
+  return '';
+}
+function renderDraftBar(d){
   const bar=document.getElementById('draftBar');
   if(!d){ bar.classList.remove('show'); return; }
   document.getElementById('draftTitle').textContent=`下書きを編集中：${d.data.client_name||'（名前不明）'} ${d.date}`;
-  document.getElementById('draftNotes').innerHTML=(notes&&notes.length)
-    ?`<ul>${notes.map(n=>`<li>${eh(n)}</li>`).join('')}</ul>`
-    :'<div style="margin-top:4px">要確認の項目はありません。内容を見て「カルテを生成する」で保存してください。</div>';
+  const manual=curExtra.filter(x=>x.manual);
+  document.getElementById('draftNotes').innerHTML=
+    (curNotes.length
+      ? `<ul>${curNotes.map((n,i)=>`<li class="${(n.done||(n.items&&n.items.every(x=>x.done)))?'done':''}"><span class="ntext">${eh(n.text)}</span>${noteControl(n,i)}</li>`).join('')}</ul>`
+      : '<div style="margin-top:4px">要確認の項目はありません。内容を見て「カルテを生成する」で保存してください。</div>')
+    +`<details class="manual"${manualOpen?' open':''}><summary>＋ 枠に無い読み間違いを指定する</summary>
+      <div class="fix"><select id="mf_kind">${Object.entries(KIND_LABEL).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
+        <input type="text" id="mf_written" placeholder="AI の読み取り（例: ワイドSQ）" autocomplete="off">
+        <input type="text" id="mf_correct" placeholder="正しくは（例: ワイドスクワット）" autocomplete="off">
+        <button class="btn bo bsm" onclick="fixManual()">指定</button></div>
+      <div class="hint">種目名・顧客名・プリセット名は、次回の読み取りから自動で直します。「その他」は文章の指摘として学習に使います。</div>
+      ${manual.map(x=>`<div class="fix-ok">✓ ${eh(x.field==='hint'?'指摘':KIND_LABEL[x.name]||'')}：「${eh(x.ai||'')}」→「${eh(x.final)}」</div>`).join('')}
+    </details>`;
   bar.classList.add('show');
+}
+
+// この端末で指定した「書かれ方 → 正しい表記」。次の下書きからすぐ使う（学習の結果を待たない）
+function addLocalAlias(kind,written,correct){
+  written=String(written||'').trim(); correct=String(correct||'').trim();
+  if(!written || !correct || norm(written)===norm(correct)) return false;
+  store.localAliases=(store.localAliases||[]).filter(a=>!(a.kind===kind && norm(a.written)===norm(written)));
+  store.localAliases.push({ kind, written, correct, at:new Date().toISOString() });
+  save(); renderMemory();
+  return true;
+}
+function removeLocalAlias(i){
+  store.localAliases.splice(i,1); save(); renderMemory();
+}
+function aliasDiff(kind,written,correct,manual){
+  return Object.assign({ field:'alias', name:kind, ai:written, final:correct }, manual?{ manual:true }:{});
+}
+// トレーニングの種目名を変える（行の id はそのまま。保存時に train_renamed として学習へ送られる）
+function renameTrainRow(oldKey,newKey){
+  const r=TRL.find(x=>x.key===oldKey);
+  if(!r){ toast('その種目が見つかりません'); return false; }
+  if(oldKey===newKey) return true;
+  if(TRL.find(x=>x.key===newKey)){ toast(`「${newKey}」はすでにあります`); return false; }
+  r.key=newKey;
+  const el=document.getElementById(r.rowId);
+  el.querySelector('.ktag').textContent=newKey;
+  const exists=!!store.trainAssets.find(a=>a.name===newKey);
+  const badge=el.querySelector('.nbadge');
+  if(badge && exists) badge.remove();
+  if(!badge && !exists) el.querySelector('.ktag').insertAdjacentHTML('afterend','<span class="nbadge">NEW</span>');
+  return true;
+}
+
+function fixClient(i){
+  const n=curNotes[i];
+  const v=document.getElementById('nt_'+i).value.trim();
+  if(!v){ toast('正しい顧客名を入力してください'); return; }
+  const name=findByName(Object.keys(store.clients),v,x=>x)||v;
+  document.getElementById('clientName').value=name;
+  applyClient(name);
+  const learned=addLocalAlias('client',n.written,name);
+  if(learned) curExtra.push(aliasDiff('client',n.written,name));
+  n.done=true;
+  n.result=`顧客名を「${name}」にしました`+(learned?`（次回から「${n.written}」は「${name}」と読みます）`:'');
+  renderDraftBar(curDraftObj());
+}
+function fixExercise(i,j){
+  const n=curNotes[i], it=n.items[j];
+  const v=document.getElementById(`nt_${i}_${j}`).value.trim();
+  if(!v){ it.done=true; it.result=`「${it.name}」のまま（新しい種目として登録します）`; renderDraftBar(curDraftObj()); return; }
+  const a=findByName(store.trainAssets,v);
+  const target=a?a.name:v;
+  if(!renameTrainRow(it.name,target)) return;
+  const learned=addLocalAlias('exercise',it.name,target);
+  if(learned) curExtra.push(aliasDiff('exercise',it.name,target));
+  it.done=true;
+  it.result=`「${it.name}」→「${target}」`+(learned?'（次回から自動で直します）':'');
+  renderDraftBar(curDraftObj());
+}
+function fixPreset(i){
+  const n=curNotes[i];
+  const p=store.trainPresets.find(x=>x.name===document.getElementById('nt_'+i).value);
+  if(!p) return;
+  if(!confirm(`WU を「${p.name}」で作り直します（WU の欄の入力は置き換わります）。よろしいですか？`)) return;
+  curWuRows.forEach(id=>{ if(TRL.find(r=>r.rowId===id)) rmTBlock(id); });
+  const uniq=makeUniq(new Set(TRL.map(r=>r.key)));
+  const w=expandWarmup(p, (curDraftData&&curDraftData.warmup&&curDraftData.warmup.changes)||[], uniq);
+  // WU はトレーニングの前半なので、作り直した行を先頭へ
+  const box=document.getElementById('trainRows');
+  const first=[...box.children].find(e=>e.id && !w.ids.includes(e.id));
+  w.ids.forEach(id=>box.insertBefore(document.getElementById(id), first||null));
+  syncOrder();
+  curWuRows=w.ids; curWuPreset=p.name;
+  const learned=addLocalAlias('preset',n.written,p.name);
+  if(learned) curExtra.push(aliasDiff('preset',n.written,p.name));
+  n.done=true;
+  n.result=`WU を「${p.name}」で作り直しました`+(w.warns.length?`（${w.warns.join('／')}）`:'')+(learned?`。次回から「${n.written}」は「${p.name}」と読みます`:'');
+  renderDraftBar(curDraftObj());
+}
+function fixHint(i){
+  const n=curNotes[i];
+  const v=document.getElementById('nt_'+i).value.trim();
+  if(!v){ toast('正しい内容を入力してください'); return; }
+  curExtra.push({ field:'hint', name:n.text, ai:null, final:v });
+  n.done=true; n.result=v;
+  renderDraftBar(curDraftObj());
+  toast('記録しました（学習に使います）。カルテの欄は直接直してください');
+}
+function fixManual(){
+  const kind=document.getElementById('mf_kind').value;
+  const w=document.getElementById('mf_written').value.trim();
+  const c=document.getElementById('mf_correct').value.trim();
+  if(!w || !c){ toast('「AI の読み取り」と「正しくは」を入力してください'); return; }
+  manualOpen=true;
+  if(kind==='exercise'){
+    const a=findByName(store.trainAssets,c); const target=a?a.name:c;
+    const row=TRL.find(r=>norm(r.key)===norm(w));
+    if(row && !renameTrainRow(row.key,target)) return;
+    addLocalAlias('exercise',w,target);
+    curExtra.push(aliasDiff('exercise',w,target,true));
+  } else if(kind==='client'){
+    const name=findByName(Object.keys(store.clients),c,x=>x)||c;
+    if(norm(document.getElementById('clientName').value)===norm(w)){ document.getElementById('clientName').value=name; applyClient(name); }
+    addLocalAlias('client',w,name);
+    curExtra.push(aliasDiff('client',w,name,true));
+  } else if(kind==='preset'){
+    const p=findByName(store.trainPresets,c);
+    if(!p){ toast('そのプリセットは登録されていません'); return; }
+    addLocalAlias('preset',w,p.name);
+    curExtra.push(aliasDiff('preset',w,p.name,true));
+  } else {
+    curExtra.push({ field:'hint', name:w, ai:w, final:c, manual:true });
+  }
+  renderDraftBar(curDraftObj());
+  toast(kind==='other'?'指摘を記録しました（学習に使います）':'対応を指定しました（次回の読み取りから使います）');
 }
 function finishDraft(id){
   store.drafts=store.drafts.filter(x=>x.id!==id);
@@ -1563,7 +1748,7 @@ function finishDraft(id){
 function discardDraft(){
   if(!curDraftId) return;
   if(!confirm('この下書きを破棄しますか？（元に戻せません）')) return;
-  queueFeedback(curDraftId, null, null);
+  queueFeedback(curDraftId, null, null, curExtra);
   finishDraft(curDraftId);
   flushFeedback();
   clearForm(); addSBlock();
@@ -1604,13 +1789,17 @@ function diffSnap(a,b){
   const ai=new Set(a.training.map(r=>r.id));
   a.training.forEach(r=>{
     const f=bi.get(r.id);
-    if(!f) out.push({ field:'train_removed', name:r.name, ai:r.value, final:null });
-    else if(f.value!==r.value) out.push({ field:'train_value', name:r.name, ai:r.value, final:f.value });
+    if(!f){ out.push({ field:'train_removed', name:r.name, ai:r.value, final:null }); return; }
+    if(f.name!==r.name) out.push({ field:'train_renamed', name:r.name, ai:r.name, final:f.name });
+    if(f.value!==r.value) out.push({ field:'train_value', name:f.name, ai:r.value, final:f.value });
   });
   b.training.filter(r=>!ai.has(r.id)).forEach(r=>out.push({ field:'train_added', name:r.name, ai:null, final:r.value }));
-  const kept=a.training.filter(r=>bi.has(r.id)).map(r=>r.name);
-  const keptFinal=b.training.filter(r=>ai.has(r.id)).map(r=>r.name);
-  if(kept.join('\n')!==keptFinal.join('\n')) out.push({ field:'train_order', ai:kept, final:keptFinal });
+  const keptIds=a.training.filter(r=>bi.has(r.id)).map(r=>r.id);
+  const finalIds=b.training.filter(r=>ai.has(r.id)).map(r=>r.id);
+  if(keptIds.join('\n')!==finalIds.join('\n')){
+    const an=new Map(a.training.map(r=>[r.id,r.name]));
+    out.push({ field:'train_order', ai:keptIds.map(id=>an.get(id)), final:finalIds.map(id=>bi.get(id).name) });
+  }
   const field=t=>t==='体調'?'condition':t==='メモ'?'notes':'block';
   const blk=x=>new Map(x.blocks.filter(z=>z.t||z.c).map(z=>[z.t,z.c]));
   const ab=blk(a), bb=blk(b);
@@ -1620,10 +1809,10 @@ function diffSnap(a,b){
   return out;
 }
 function plainSnap(x){ return x?{ client_name:x.client_name, date:x.date, training:x.training.map(({name,value})=>({name,value})), blocks:x.blocks }:{}; }
-function queueFeedback(draftId, before, after){
+function queueFeedback(draftId, before, after, extra){
   const d=store.drafts.find(x=>x.id===draftId); if(!d) return;
   const last=!store.drafts.some(x=>x.jobId===d.jobId && x.id!==draftId);
-  const diffs=(before&&after)?diffSnap(before,after):[];
+  const diffs=((before&&after)?diffSnap(before,after):[]).concat(extra||[]);
   if(!diffs.length && !last) return;
   store.pendingFeedback.push({
     job_id:d.jobId, draft_index:Number(String(d.id).split('_').pop())||0,
@@ -1695,10 +1884,14 @@ function renderMemory(){
   const pending=(store.ocrMemory&&store.ocrMemory.pending)||0;
   const unsent=store.pendingFeedback.length;
   const tail=[pending?`学習待ちの訂正 ${pending}件`:'', unsent?`未送信 ${unsent}件`:''].filter(Boolean).join('・');
-  if(!m){ el.innerHTML=`まだありません${tail?'（'+tail+'）':''}。下書きを直して保存すると、その訂正から学習します。`; return; }
-  el.innerHTML=`<div>v${m.version}・訂正 ${m.feedback_count}件から学習${tail?'（'+tail+'）':''}</div>`+
+  let html;
+  if(!m) html=`まだありません${tail?'（'+tail+'）':''}。下書きを直して保存すると、その訂正から学習します。`;
+  else html=`<div>v${m.version}・訂正 ${m.feedback_count}件から学習${tail?'（'+tail+'）':''}</div>`+
     ((m.aliases||[]).length?`<div style="margin-top:4px">対応表：${m.aliases.map(a=>`${eh(a.written)}→${eh(a.correct)}`).join('、')}</div>`:'')+
     ((m.rules||[]).length?`<ul style="margin:4px 0 0 18px">${m.rules.map(r=>`<li>${eh(r)}</li>`).join('')}</ul>`:'');
+  const loc=store.localAliases||[];
+  if(loc.length) html+=`<div style="margin-top:6px">この端末で指定した対応：${loc.map((a,i)=>`<span class="rtag">${eh(KIND_LABEL[a.kind]||'')} ${eh(a.written)}→${eh(a.correct)}<button onclick="removeLocalAlias(${i})" title="取り消す">✕</button></span>`).join('')}</div>`;
+  el.innerHTML=html;
 }
 
 // ─── バックアップ（URL・端末の移行用）───

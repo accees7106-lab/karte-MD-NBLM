@@ -301,6 +301,21 @@ class VaultTest(VaultTestCase):
         worker.process(self.sb, self.sb.claim_next())
         self.assertIn("日付: AI「10/5」→ 正しくは「10/6」", self.prompts()[-1])  # 直近の訂正はそのまま読み取りに使う
 
+    def test_trainer_corrections_are_always_learned(self):
+        name = f"{ts(datetime.now(timezone.utc) - timedelta(hours=1))}_{JOB_ID}_0.json"
+        self.seed_job(status="feedback")
+        self.seed_main(f"Karte/訂正ログ/{name[:4]}-{name[4:6]}/{name}", {"job_id": JOB_ID, "diffs": [
+            {"field": "alias", "name": "exercise", "ai": "ワイドSQ", "final": "ワイドスクワット"},
+            {"field": "hint", "name": "読み取り：重量が判別しにくい", "ai": None, "final": "80kg が正しい"}]})
+        # 要約側（LLM）が指定を取りこぼしても、対応表には必ず入る
+        self.set_claude_output({"type": "result", "is_error": False, "structured_output": {"rules": ["r"], "aliases": []}})
+        self.assertTrue(worker.consolidate(self.sb))
+        p = self.prompts()[-1]
+        self.assertIn("【トレーナーの指定】種目名「ワイドSQ」と書かれていたら「ワイドスクワット」と読む", p)
+        self.assertIn("【トレーナーの指摘】読み取り：重量が判別しにくい → 80kg が正しい", p)
+        mem = json.loads(self.read("Karte/読み癖/memory.json"))
+        self.assertIn({"written": "ワイドSQ", "correct": "ワイドスクワット", "kind": "exercise"}, mem["aliases"])
+
     def test_learning_rejects_forgetting(self):
         name = f"{ts(datetime.now(timezone.utc) - timedelta(hours=1))}_{JOB_ID}_0.json"
         self.seed_job(status="feedback")

@@ -183,10 +183,15 @@ async function step(name, fn) {
     await page.evaluate(() => { document.getElementById('clientName').value = '出口'; document.getElementById('sessionDate').value = '2026-10-07'; });
     await page.click('.btn-gen');
     await page.waitForFunction(() => document.getElementById('toast').textContent.length > 0);
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingRecords.length === 1);
-    assert.equal(api.records.length, 1);
-    assert.match(await page.textContent('#ocrStatus'), /Vault未送信のカルテ 1件/);
-    api.recordsFail = false;
+    try {
+      await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingRecords.length === 1);
+      assert.equal(api.records.length, 1);
+      // 送信の失敗が画面に出るのは、通信が失敗して戻ってきてから
+      await page.waitForFunction(() => document.getElementById('ocrStatus').textContent.includes('Vault未送信のカルテ 1件'));
+    } finally {
+      api.recordsFail = false;
+    }
+    await page.waitForFunction(() => !flushingRec);
     await page.evaluate(() => flushRecords());
     assert.equal(api.records.length, 2);
     assert.equal(api.records[1].id, '20261007_出口');
@@ -232,6 +237,107 @@ async function step(name, fn) {
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingFeedback.length === 0);
     assert.equal(api.feedback.length, 2);
     assert.deepEqual([api.feedback[1].job_id, api.feedback[1].last, api.feedback[1].diffs], [DONE.id, true, []]);
+  });
+
+  // ─── 黄色の枠：事例ごとの訂正 ───
+  const inject = drafts => page.evaluate(ds => { store.drafts.push(...ds); save(); renderDrafts(); }, drafts);
+  const openLast = () => page.click('#draftList .ocr-row:last-child button');
+  const note = text => page.locator('#draftNotes li', { hasText: text });
+  const feedbackSent = () => page.waitForFunction(() => JSON.parse(localStorage.getItem('training_karte_v2')).pendingFeedback.length === 0);
+
+  await step('黄色の枠：顧客名を直すと、カルテに反映し、対応を覚える', async () => {
+    await inject([{ id: 'job-c_0', jobId: 'cccccccc-0000-0000-0000-000000000001', date: '2026-10-09',
+      data: { client_name: '玉屋', client_confidence: 'low', date: '2026-10-09', condition: null,
+        warmup: { preset: 'WU-Z', changes: [{ op: 'replace', from: 'ローリング', to: 'ハーフローリング' }] },
+        training: [{ name: 'ヒップスラスト', sets: [{ kg: 60, reps: 10, sets: 3 }], text: null }],
+        notes: null, uncertain: ['ヒップスラストの重量が 60 か 80 か判別しにくい'] } }]);
+    await openLast();
+    const li = note('「玉屋」は未登録の顧客です');
+    await li.locator('input').fill('玉谷');
+    await li.locator('button').click();
+    assert.equal(await page.inputValue('#clientName'), '玉谷');
+    assert.match(await note('顧客名').textContent(), /次回から「玉屋」は「玉谷」と読みます/);
+    assert.deepEqual((await store(page)).localAliases.map(a => [a.kind, a.written, a.correct]), [['client', '玉屋', '玉谷']]);
+  });
+
+  await step('黄色の枠：未登録の WU プリセットを選び直すと、WU を作り直して先頭に並べる', async () => {
+    assert.deepEqual(await trainNames(page), ['ハーフローリング', 'ヒップスラスト']);
+    const li = note('WUプリセット「WU-Z」が登録されていません');
+    await li.locator('select').selectOption('WU-B');
+    await li.locator('button').click();
+    assert.deepEqual(await trainNames(page), ['チェストオープナー', 'ハーフローリング', 'ヒップスラスト']);
+    assert.match(await note('WU-Z').textContent(), /WU を「WU-B」で作り直しました/);
+    assert.ok((await store(page)).localAliases.find(a => a.kind === 'preset' && a.written === 'WU-Z' && a.correct === 'WU-B'));
+  });
+
+  await step('黄色の枠：新しい種目の読み違いを直す（空欄なら、そのまま登録）', async () => {
+    const li = note('新しい種目');
+    await li.locator('.fix').nth(0).locator('input').fill('ローリング');
+    await li.locator('.fix').nth(0).locator('button').click();
+    assert.deepEqual(await trainNames(page), ['チェストオープナー', 'ローリング', 'ヒップスラスト']);
+    assert.equal(await page.locator('#trainRows .tb2').nth(1).locator('.nbadge').count(), 0); // 登録済みの種目なので NEW が外れる
+    await li.locator('.fix').nth(0).locator('button').click();                                // ヒップスラスト：空欄＝このまま
+    const t = await li.textContent();
+    assert.match(t, /「ハーフローリング」→「ローリング」/);
+    assert.match(t, /「ヒップスラスト」のまま/);
+  });
+
+  await step('黄色の枠：読めなかった箇所に文章で指摘を書ける／枠に無い読み間違いも指定できる', async () => {
+    const li = note('判別しにくい');
+    await li.locator('input').fill('80kg が正しい');
+    await li.locator('button').click();
+    assert.match(await note('判別しにくい').textContent(), /記録しました：80kg が正しい/);
+    await page.click('#draftNotes details.manual summary');
+    await page.selectOption('#mf_kind', 'exercise');
+    await page.fill('#mf_written', 'ヒップスラスト');
+    await page.fill('#mf_correct', 'ヒップリフト');
+    await page.click('#draftNotes details.manual button');
+    assert.ok((await trainNames(page)).includes('ヒップリフト'));
+    assert.ok(await page.locator('#draftNotes details.manual').evaluate(e => e.open));   // 指定のあとも開いたまま
+    assert.match(await page.textContent('#draftNotes details.manual'), /種目名：「ヒップスラスト」→「ヒップリフト」/);
+  });
+
+  await step('保存すると、指定した訂正（対応・指摘・種目名の変更）を学習用に送る', async () => {
+    const n = api.feedback.length;
+    await page.fill('#sessionBlocks textarea', '確認用');
+    await page.click('.btn-gen');
+    await page.waitForSelector('#resultArea:not(.ph)');
+    await feedbackSent();
+    const f = api.feedback[n];
+    assert.equal(f.job_id, 'cccccccc-0000-0000-0000-000000000001');
+    assert.equal(f.last, true);
+    const has = (field, pred) => f.diffs.some(d => d.field === field && pred(d));
+    assert.ok(has('alias', d => d.name === 'client' && d.ai === '玉屋' && d.final === '玉谷'));
+    assert.ok(has('alias', d => d.name === 'preset' && d.ai === 'WU-Z' && d.final === 'WU-B'));
+    assert.ok(has('alias', d => d.name === 'exercise' && d.ai === 'ハーフローリング' && d.final === 'ローリング'));
+    assert.ok(has('alias', d => d.name === 'exercise' && d.ai === 'ヒップスラスト' && d.final === 'ヒップリフト' && d.manual));
+    assert.ok(has('hint', d => /判別しにくい/.test(d.name) && d.final === '80kg が正しい'));
+    assert.ok(has('train_renamed', d => d.ai === 'ヒップスラスト' && d.final === 'ヒップリフト'));
+    assert.ok(has('client_name', d => d.ai === '玉屋' && d.final === '玉谷'));
+    assert.ok(!f.diffs.some(d => d.field === 'train_order'));   // 名前を変えただけでは「順番の変更」にならない
+    const md = (await store(page)).records[0].content;
+    assert.match(md, /"ヒップリフト": "60kg 10reps 3sets"/);
+  });
+
+  await step('次の下書きでは、指定した対応が最初から効く（学習の結果を待たない）', async () => {
+    await inject([{ id: 'job-d_0', jobId: 'dddddddd-0000-0000-0000-000000000001', date: '2026-10-10',
+      data: { client_name: '玉屋', client_confidence: 'high', date: '2026-10-10', condition: '良好',
+        warmup: { preset: 'WU-Z', changes: [] },
+        training: [{ name: 'ヒップスラスト', sets: [{ kg: 80, reps: 8, sets: 3 }], text: null }],
+        notes: null, uncertain: [] } }]);
+    await openLast();
+    assert.equal(await page.inputValue('#clientName'), '玉谷');
+    assert.deepEqual(await trainNames(page), ['チェストオープナー', 'ローリング', 'ヒップリフト']);
+    assert.match(await page.textContent('#draftBar'), /要確認の項目はありません/);
+  });
+
+  await step('設定欄で、この端末で指定した対応を確認・取り消せる', async () => {
+    await page.evaluate(() => { document.querySelector('details.cfg').open = true; });
+    const mv = page.locator('#memView');
+    assert.match(await mv.textContent(), /この端末で指定した対応/);
+    const before = (await store(page)).localAliases.length;
+    await mv.locator('.rtag button').first().click();
+    assert.equal((await store(page)).localAliases.length, before - 1);
   });
 
   assert.deepEqual(errors, []);
