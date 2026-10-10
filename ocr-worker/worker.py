@@ -19,6 +19,8 @@ import base64
 import json
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -37,6 +39,9 @@ MEMORY_FILE = DIR_MEMORY + "/memory.json"
 SETTLE_SEC = 120            # 訂正ログがこれより新しいうちは学習に回さない（同時刻の書き込みを取りこぼさないため）
 LEARN_CHECK_SEC = 120       # 学習待ちを確認する間隔
 INBOX_IDLE_SEC = 600        # inbox ブランチを作り直すまでの無操作時間
+HEARTBEAT_PATH = "worker/heartbeat.json"   # inbox ブランチに置く「ノートPC の今の状態」（カルテの画面に出す）
+HEARTBEAT_SEC = 300         # 状態が変わらなくても、この間隔で「生きている」と書く
+WORKER_VERSION = "2026-10-10"
 STALE_MINUTES = 15
 MAX_ATTEMPTS = 2
 CONSOLIDATE_BATCH = 10      # 1回の学習で見比べる訂正の数
@@ -367,6 +372,40 @@ class GitHubStore:
             self.delete(self.inbox, job["image_path"], f"karte-inbox: remove photo {job['id']}")
         self.delete(self.inbox, job.get("_path") or f"{JOBS_DIR}/{job['id']}.json", f"karte-inbox: remove job {job['id']}")
 
+    def heartbeat(self, state, error=None, force=False):
+        """ノートPC の状態を inbox ブランチの worker/heartbeat.json に書く。
+        状態が変わったとき・エラーのとき・HEARTBEAT_SEC ごとにだけ書く（コミットを増やしすぎない）。書けなくても止めない。"""
+        now = time.time()
+        hb = getattr(self, "_hb", None) or {"state": None, "written": 0, "last_error": None, "last_error_at": None, "since": now_iso()}
+        if error:
+            hb["last_error"], hb["last_error_at"] = str(error)[:300], now_iso()
+        if not (force or error or state != hb["state"] or now - hb["written"] >= HEARTBEAT_SEC):
+            return False
+        if state != hb["state"]:
+            hb["since"] = now_iso()
+        body = {
+            "host": socket.gethostname(), "version": WORKER_VERSION, "state": state, "since": hb["since"],
+            "updated_at": now_iso(), "interval_sec": HEARTBEAT_SEC,
+            "last_error": hb["last_error"], "last_error_at": hb["last_error_at"],
+        }
+        hb["state"] = state
+        self._hb = hb
+        try:
+            self.write(self.inbox, HEARTBEAT_PATH, self._dump(body), f"karte-inbox: worker {state}")
+            hb["written"] = now
+            return True
+        except (urllib.error.URLError, RuntimeError):
+            return False  # inbox ブランチがまだ無い（写真が一度も送られていない）ときなど
+
+    def last_jobs_commit_time(self):
+        """inbox ブランチで jobs/ を最後に変えたコミットの時刻（無ければ None）。"""
+        q = f"sha={urllib.parse.quote(self.inbox[1], safe='')}&path={JOBS_DIR}&per_page=1"
+        status, data = self.call("GET", f"/repos/{self.inbox[0]}/commits?{q}")
+        self._check(status, data, "inbox ブランチの履歴の確認")
+        if not data:
+            return None
+        return parse_iso(((data[0].get("commit") or {}).get("committer") or {}).get("date"))
+
     def reset_inbox_if_idle(self):
         """ジョブが1件も無く、しばらく誰も書いていなければ、inbox ブランチを履歴ごと作り直す（写真の履歴を残さない）。"""
         if self.inbox == self.vault or "inbox" not in self.inbox[1]:
@@ -377,11 +416,9 @@ class GitHubStore:
         self._check(status, ref, "inbox ブランチの確認")
         if self.list_dir(self.inbox, JOBS_DIR):
             return False
-        status, c = self.call("GET", f"/repos/{self.inbox[0]}/git/commits/{ref['object']['sha']}")
-        self._check(status, c, "inbox ブランチの確認")
-        if not c.get("parents"):
-            return False  # もう作り直したばかり
-        last = parse_iso((c.get("committer") or {}).get("date"))
+        # 写真（jobs/）の履歴が無ければ片付けるものは無い。最後に jobs/ が動いてから時間がたっていなければ待つ
+        # （worker/heartbeat.json の更新は数に入れない）
+        last = self.last_jobs_commit_time()
         if not last or (datetime.now(timezone.utc) - last).total_seconds() < int(os.environ.get("INBOX_IDLE_SEC", INBOX_IDLE_SEC)):
             return False
         repo = self.inbox[0]
@@ -645,10 +682,7 @@ def call_claude(prompt, schema, workdir):
     if os.environ.get("CLAUDE_MODEL"):
         cmd += ["--model", os.environ["CLAUDE_MODEL"]]
     # プロンプトは標準入力で渡す（Windows のコマンドライン長・引用符の問題を避ける）
-    proc = subprocess.run(
-        cmd, input=prompt, capture_output=True, text=True,
-        encoding="utf-8", cwd=workdir, timeout=int(os.environ.get("CLAUDE_TIMEOUT_SEC", "300")),
-    )
+    proc = run_with_timeout(cmd, prompt, workdir, int(os.environ.get("CLAUDE_TIMEOUT_SEC", "300")))
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip()[-400:]
         if "Not logged in" in msg or "login" in msg.lower():
@@ -658,6 +692,47 @@ def call_claude(prompt, schema, workdir):
     if out.get("is_error"):
         raise RuntimeError(f"claude がエラーを返しました: {str(out.get('result'))[:400]}")
     return out.get("structured_output") or out.get("result") or ""
+
+
+class Completed:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def run_with_timeout(cmd, input_text, cwd, timeout):
+    """コマンドを実行し、時間切れなら子プロセスごと終わらせる。
+    subprocess.run(timeout=…) は直接の子しか止めず、孫プロセスが出力をつかんだままだと待ち続けて固まるため。"""
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, encoding="utf-8", errors="replace", cwd=cwd, **kw)
+    try:
+        out, err = p.communicate(input_text, timeout=timeout)
+        return Completed(p.returncode, out, err)
+    except subprocess.TimeoutExpired:
+        kill_tree(p)
+        try:
+            p.communicate(timeout=10)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        raise RuntimeError(f"claude -p が {timeout} 秒で終わらなかったため止めました")
+
+
+def kill_tree(p):
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True, timeout=30)
+        else:
+            os.killpg(p.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        p.kill()
+    except OSError:
+        pass
 
 
 def run_claude(image_path, ctx, workdir, taken_at=None, memory=None, recent=None):
@@ -694,6 +769,7 @@ def process(sb, job):
     except Exception as e:  # noqa: BLE001 — ジョブ単位で記録して次へ進む
         sb.update_job(job, {"status": "error", "error": str(e)[:500], "processed_at": now_iso()})
         log(f"エラー {job['id']}：{e}")
+        sb.heartbeat("idle", error=f"読み取りに失敗：{e}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -956,8 +1032,10 @@ def main():
     poll = int(os.environ.get("POLL_SEC", "30"))
     learn_retry_at = learn_check_at = 0
     log("ocr-worker 起動" + ("（--once）" if args.once else f"（{poll}秒ごとに確認）"))
+    sb.heartbeat("idle", force=True)
     while True:
         try:
+            sb.heartbeat("idle")
             sb.release_stale()
             worked = False
             while True:
@@ -970,20 +1048,31 @@ def main():
             if worked or args.once or time.time() >= learn_check_at:
                 learn_check_at = time.time() + LEARN_CHECK_SEC
                 while time.time() >= learn_retry_at:
+                    # 読み取り待ちの写真があれば、学習より先にそちらをやる
+                    if any(j.get("status") == "queued" for j in sb.list_jobs()):
+                        break
                     try:
+                        sb.heartbeat("learning")
                         if not consolidate(sb):
                             break
                     except (ValueError, RuntimeError, json.JSONDecodeError) as e:
                         log(f"学習に失敗しました（訂正は残っているので30分後にやり直します）：{e}")
+                        sb.heartbeat("idle", error=f"学習に失敗：{e}")
                         learn_retry_at = time.time() + 1800
                         break
+                    finally:
+                        sb.heartbeat("idle")
                 cleanup(sb)
         except NotLoggedIn as e:
+            sb.heartbeat("stopped", error=str(e))
             sys.exit(str(e))
         except urllib.error.URLError as e:
             log(f"GitHub に接続できません：{e}")
         except RuntimeError as e:  # GitHub の一時的なエラーや書き込みの競合：次の巡回でやり直す
             log(f"GitHub の処理に失敗しました（次の巡回でやり直します）：{e}")
+        except Exception as e:  # noqa: BLE001 — 想定外のエラーでもワーカーは止めない（止まると写真が溜まり続ける）
+            log(f"想定外のエラー（次の巡回でやり直します）：{type(e).__name__}: {e}")
+            sb.heartbeat("idle", error=f"{type(e).__name__}: {e}")
         if args.once:
             log("処理待ちはありません。終了します")
             return

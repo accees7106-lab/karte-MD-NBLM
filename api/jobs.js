@@ -9,7 +9,10 @@ const store = require('./_store');
 const { validId, route } = require('./_lib');
 
 module.exports = route({
-  GET: async () => ({ jobs: await store.listJobs() }),
+  GET: async () => {
+    const [jobs, worker] = await Promise.all([store.listJobs(), store.workerStatus()]);
+    return { jobs, worker };
+  },
   POST: ({ body }) => store.createJob(body),
   PATCH: ({ query, body }) => store.updateJob(validId(query.id), body && body.status),
   DELETE: async ({ query }) => { const id = validId(query.id); return { id, deleted: await store.removeJob(id) }; },

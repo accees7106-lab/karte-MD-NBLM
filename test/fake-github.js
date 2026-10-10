@@ -18,10 +18,10 @@ function start(opts = {}) {
     if (!r.branches[name] && create) r.branches[name] = { files: new Map(), commits: [] };
     return r.branches[name];
   };
-  const commit = (b, message, parents = null) => {
+  const commit = (b, message, path, parents = null) => {
     const sha = sha1(Buffer.from(String(Math.random()) + message));
     const prev = b.commits.length ? [b.commits[b.commits.length - 1].sha] : [];
-    b.commits.push({ sha, message, date: new Date().toISOString(), parents: parents || prev });
+    b.commits.push({ sha, message, date: new Date(Date.now() - (state.ageMs || 0)).toISOString(), parents: parents || prev, paths: path ? [path] : [] });
     return sha;
   };
   // 実際の GitHub と同じく、既定ブランチ main は最初から存在する
@@ -43,8 +43,9 @@ function start(opts = {}) {
       state.calls.push(`${req.method} ${path}`);
 
       if (path === '/__fail') { state.failPuts = body().n; return send(200, {}); }
+      if (path === '/__age') { state.ageMs = body().ms || 0; return send(200, {}); }
       if (path === '/__readonly') { state.readOnly = !!body().on; return send(200, {}); }
-      if (path === '/__reset') { state.repos = {}; state.failPuts = 0; state.readOnly = false; state.calls = []; (opts.seed || []).forEach(r => state.seed(r)); return send(200, {}); }
+      if (path === '/__reset') { state.repos = {}; state.failPuts = 0; state.readOnly = false; state.ageMs = 0; state.calls = []; (opts.seed || []).forEach(r => state.seed(r)); return send(200, {}); }
       if (path === '/__tree' || path === '/__file' || path === '/__commits') {
         const b = branchOf(url.searchParams.get('repo'), url.searchParams.get('branch'));
         if (!b) return send(404, {});
@@ -56,6 +57,16 @@ function start(opts = {}) {
 
       if ((req.headers.authorization || '') !== `Bearer ${token}`) return send(401, { message: 'Bad credentials' });
       let m;
+
+      // コミットの一覧（path で絞り込み、新しい順）
+      if ((m = path.match(/^\/repos\/([^/]+\/[^/]+)\/commits$/)) && req.method === 'GET') {
+        const b = branchOf(m[1], url.searchParams.get('sha') || 'main');
+        if (!b) return send(404, { message: 'Not Found' });
+        const pfx = url.searchParams.get('path');
+        let list = b.commits.filter(c => !pfx || (c.paths || []).some(x => x === pfx || x.startsWith(pfx + '/'))).slice().reverse();
+        list = list.slice(0, Number(url.searchParams.get('per_page') || 30));
+        return send(200, list.map(c => ({ sha: c.sha, commit: { message: c.message, committer: { date: c.date } } })));
+      }
 
       // リポジトリとブランチの確認（worker.py --check 用）
       if ((m = path.match(/^\/repos\/([^/]+\/[^/]+)$/)) && req.method === 'GET') {
@@ -100,7 +111,7 @@ function start(opts = {}) {
           const buf = Buffer.from(content, 'base64');
           const nsha = sha1(buf);
           b2.files.set(p, { buf, sha: nsha });
-          commit(b2, message);
+          commit(b2, message, p);
           return send(cur ? 200 : 201, { content: { sha: nsha, path: p } });
         }
         if (req.method === 'DELETE') {
@@ -108,7 +119,7 @@ function start(opts = {}) {
           if (!cur) return send(404, { message: 'Not Found' });
           if (body().sha !== cur.sha) return send(409, { message: 'sha does not match' });
           b2.files.delete(p);
-          commit(b2, body().message);
+          commit(b2, body().message, p);
           return send(200, { commit: {} });
         }
       }
@@ -165,7 +176,7 @@ function start(opts = {}) {
       const blob = r.objects[t.sha];
       b.files.set(t.path, { buf: blob.buf, sha: t.sha });
     }
-    b.commits.push({ sha, message: o.message, date: o.date, parents: o.parents });
+    b.commits.push({ sha, message: o.message, date: o.date, parents: o.parents, paths: [...b.files.keys()] });
     r.branches[name] = b;
     return sha;
   }

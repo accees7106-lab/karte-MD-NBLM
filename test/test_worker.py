@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -441,6 +442,48 @@ class VaultTest(VaultTestCase):
             os.environ.pop("KARTE_LOG", None)
         with open(path, "rb") as f:
             self.assertIn("起動（30秒ごとに確認）".encode("utf-8"), f.read())
+
+    # ─── ノートPC の状態報告（カルテの画面に出す）───
+    def test_heartbeat_is_written_on_change_and_throttled(self):
+        self.assertFalse(self.sb.heartbeat("idle"))                 # inbox ブランチがまだ無い → 書けないが止まらない
+        self.create_inbox()
+        self.assertTrue(self.sb.heartbeat("idle", force=True))
+        hb = json.loads(self.read("worker/heartbeat.json", "karte-inbox"))
+        self.assertEqual((hb["state"], hb["version"], hb["last_error"]), ("idle", worker.WORKER_VERSION, None))
+        self.assertFalse(self.sb.heartbeat("idle"))                 # 変化なし・間隔内 → 書かない
+        self.assertTrue(self.sb.heartbeat("learning"))              # 状態が変わった → 書く
+        self.assertTrue(self.sb.heartbeat("idle", error="学習に失敗：時間切れ"))
+        hb = json.loads(self.read("worker/heartbeat.json", "karte-inbox"))
+        self.assertEqual((hb["state"], hb["last_error"]), ("idle", "学習に失敗：時間切れ"))
+        self.assertTrue(hb["last_error_at"])
+        self.assertEqual([j for j in self.sb.list_jobs()], [])      # 状態報告はジョブとして数えない
+
+    def test_heartbeat_does_not_block_rebuilding_the_inbox(self):
+        fake("/__age", "POST", {"ms": 3600 * 1000})                 # 写真のやり取りは1時間前
+        self.seed_job()
+        self.sb.delete_job(self.sb.list_jobs()[0])
+        fake("/__age", "POST", {"ms": 0})
+        os.environ["INBOX_IDLE_SEC"] = "600"
+        self.assertTrue(self.sb.heartbeat("idle", force=True))      # 状態報告はたった今
+        self.assertTrue(self.sb.reset_inbox_if_idle())              # それでも写真の履歴は片付ける
+        self.assertEqual(self.tree("karte-inbox"), ["README.md"])
+        self.assertFalse(self.sb.reset_inbox_if_idle())             # 片付けるものが無ければ何もしない
+
+    def test_a_hung_claude_is_killed_with_its_children(self):
+        hang = os.path.join(self.tmp, "hang")
+        with open(hang, "w") as f:
+            # 孫プロセス（sleep）が標準出力をつかんだまま残る、固まる claude の再現
+            f.write("#!/bin/sh\nsleep 60 &\nsleep 60\n")
+        os.chmod(hang, 0o755)
+        os.environ.update(CLAUDE_CMD=hang, CLAUDE_TIMEOUT_SEC="2")
+        try:
+            t0 = time.time()
+            with self.assertRaises(RuntimeError) as cm:
+                worker.call_claude("x", worker.OUTPUT_SCHEMA, self.tmp)
+            self.assertLess(time.time() - t0, 20)
+            self.assertIn("2 秒で終わらなかった", str(cm.exception))
+        finally:
+            os.environ.pop("CLAUDE_TIMEOUT_SEC", None)
 
     def test_check_env(self):
         env = dict(os.environ)

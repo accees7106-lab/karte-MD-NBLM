@@ -91,7 +91,16 @@ test('GET は画面に出す状態のジョブだけを返す（context は返�
 });
 
 test('GET: inbox ブランチがまだ無ければ空', async () => {
-  assert.deepEqual((await call(jobs)).json, { jobs: [] });
+  assert.deepEqual((await call(jobs)).json, { jobs: [], worker: null });
+});
+
+test('GET はノートPC の状態（worker/heartbeat.json）も返す', async () => {
+  seedJob({ status: 'queued' });
+  fake.state.repos['me/vault'].branches['karte-inbox'].files.set('worker/heartbeat.json',
+    { buf: Buffer.from(JSON.stringify({ state: 'idle', updated_at: '2026-10-10T05:00:00Z' })), sha: 'h1' });
+  const r = await call(jobs);
+  assert.deepEqual(r.json.worker, { state: 'idle', updated_at: '2026-10-10T05:00:00Z' });
+  assert.equal(r.json.jobs.length, 1);   // 状態報告はジョブに混ざらない
 });
 
 test('PATCH imported は完了したジョブだけ。queued はエラーだけ', async () => {

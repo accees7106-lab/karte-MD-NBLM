@@ -18,8 +18,9 @@ const MAX_IMAGE_BYTES = 3 * 1024 * 1024;   // Vercel Function のリクエスト
 const MAX_RECORD_BYTES = 200 * 1024;
 const MAX_DIFFS = 200;
 const VISIBLE = ['queued', 'processing', 'done', 'error'];
-const PUBLIC_FIELDS = ['id', 'status', 'filename', 'taken_at', 'created_at', 'processed_at', 'result', 'error'];
+const PUBLIC_FIELDS = ['id', 'status', 'filename', 'taken_at', 'created_at', 'started_at', 'processed_at', 'attempts', 'result', 'error'];
 
+const HEARTBEAT_PATH = 'worker/heartbeat.json';   // ノートPC の ocr-worker が書く「今の状態」
 const jobPath = id => `${JOBS_DIR}/${id}.json`;
 const now = () => new Date().toISOString();
 
@@ -54,6 +55,14 @@ async function listJobs() {
   });
   return jobs.filter(j => j && VISIBLE.includes(j.status)).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
     .map(j => Object.fromEntries(PUBLIC_FIELDS.map(k => [k, j[k] === undefined ? null : j[k]])));
+}
+
+// ノートPC の状態（無ければ null）。画面に「待機中・学習中・応答なし」を出すため
+async function workerStatus() {
+  const { inbox } = gh.conf();
+  const f = await gh.getFile(inbox, HEARTBEAT_PATH);
+  if (!f || !f.buf) return null;
+  try { return JSON.parse(f.buf.toString('utf8')); } catch { return null; }
 }
 
 function parseImage(dataUrl) {
@@ -189,4 +198,4 @@ async function saveRecord(body) {
   return { path };
 }
 
-module.exports = { safeName, listJobs, createJob, updateJob, removeJob, addFeedback, getMemory, saveRecord };
+module.exports = { safeName, workerStatus, listJobs, createJob, updateJob, removeJob, addFeedback, getMemory, saveRecord };

@@ -210,6 +210,8 @@
       font-size:.86rem;background:#fafafa}
     .ocr-row .rm{margin-top:0}
     .warn{color:#a16207;font-weight:700}
+    .ok{color:var(--ok);font-weight:700}
+    .worker-line{margin:6px 0 4px;font-size:.86rem}
     .err{color:var(--ng);font-weight:700}
     .draft-bar{display:none;background:#fefce8;border:1.5px solid #fde047;border-radius:10px;
       padding:11px 16px;margin-bottom:12px;font-size:.86rem;color:#713f12}
@@ -269,6 +271,7 @@
     <button class="btn bp" id="ocrUploadBtn" onclick="uploadPhotos()">送信</button>
   </div>
   <p class="hint">ノートの写真をまとめて選んで送信 → ノートPCで読み取り → 「結果を取り込む」で下書きになります</p>
+  <div class="worker-line" id="workerLine"></div>
   <div class="ocr-st" id="ocrStatus"></div>
   <div style="display:flex;gap:7px;flex-wrap:wrap">
     <button class="btn bo bsm" onclick="syncJobs(true)">🔄 結果を取り込む</button>
@@ -598,6 +601,7 @@ function init() {
   checkReminder();
   initSortables();
   loadCfg(); renderDrafts(); renderJobs(); renderMemory(); renderVault();
+  startAutoSync();
   if(cfg.token) syncJobs(false);
 }
 
@@ -1247,6 +1251,8 @@ function toast(msg){
 const CFG_KEY='karte_ocr_cfg';
 let cfg={ token:'', api:'' };
 let ocrJobs=[];
+let ocrWorker=null, ocrSynced=false;
+let AUTO_SYNC_MS=15000, autoTimer=null;   // 読み取り待ち・読み取り中の写真があるあいだ、自動で状態を取りに行く
 
 function loadCfg(){
   try{ cfg=Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY)||'{}')); }catch{}
@@ -1339,6 +1345,7 @@ async function syncJobs(manual){
   try{ data=await api('GET',''); }
   catch(e){ if(manual) toast('⚠ '+e.message); renderJobs(e.message); return; }
   ocrJobs=data.jobs||[];
+  ocrWorker=data.worker||null; ocrSynced=true;
   let added=0;
   for(const j of ocrJobs.filter(j=>j.status==='done')){
     if(!store.importedJobs.includes(j.id)){
@@ -1368,26 +1375,65 @@ function importJobResult(job){
   return list.length;
 }
 
+function ago(iso){
+  const t=Date.parse(iso); if(isNaN(t)) return '';
+  const sec=Math.max(0,(Date.now()-t)/1000);
+  if(sec<60) return `${Math.round(sec)}秒前`;
+  if(sec<3600) return `${Math.round(sec/60)}分前`;
+  if(sec<86400) return `${Math.round(sec/3600)}時間前`;
+  return fmtDT(iso);
+}
+function elapsed(iso){ return ago(iso).replace(/前$/,''); }
+
+// ノートPC（ocr-worker）の状態。数分ごとに届く報告が途切れたら「応答なし」
+function workerLine(){
+  if(!ocrSynced) return '';
+  const w=ocrWorker;
+  if(!w) return '<span class="warn">ノートPC：まだ状態の報告がありません</span><div class="rm">ノートPC のワーカーが古い版か、まだ一度も動いていません</div>';
+  const ageMin=(Date.now()-Date.parse(w.updated_at))/60000;
+  const limit=((w.interval_sec||300)/60)*2+2;
+  if(!(ageMin<limit)) return `<span class="err">ノートPC：応答なし（最終確認 ${ago(w.updated_at)}）</span>
+    <div class="rm">ノートPC の電源・ログイン・ネット接続を確認してください。写真は消えずに待っています</div>`;
+  const label={ idle:'待機中（写真が届けば、すぐ読み取ります）', learning:'学習中（終わり次第、読み取りに戻ります）', stopped:'停止中' }[w.state]||w.state;
+  let html=`<span class="${w.state==='stopped'?'err':'ok'}">ノートPC：${label}</span>（最終確認 ${ago(w.updated_at)}）`;
+  if(w.last_error && Date.now()-Date.parse(w.last_error_at)<6*3600*1000)
+    html+=`<div class="rm warn">直近のエラー（${ago(w.last_error_at)}）：${eh(w.last_error)}</div>`;
+  return html;
+}
+
 function renderJobs(errMsg){
   const st=document.getElementById('ocrStatus');
   const q=ocrJobs.filter(j=>j.status==='queued').length;
   const p=ocrJobs.filter(j=>j.status==='processing').length;
-  const e=ocrJobs.filter(j=>j.status==='error');
+  const e=ocrJobs.filter(j=>j.status==='error').length;
   const parts=[];
   if(errMsg) parts.push(`<span class="err">⚠ ${eh(errMsg)}</span>`);
   if(q) parts.push(`読み取り待ち <b>${q}</b>件`);
   if(p) parts.push(`読み取り中 <b>${p}</b>件`);
-  if(e.length) parts.push(`<span class="err">エラー ${e.length}件</span>`);
-  if(q && !p) parts.push('<span class="warn">（ノートPCの読み取りが動いていれば数分で終わります）</span>');
+  if(e) parts.push(`<span class="err">エラー ${e}件</span>`);
   if(store.pendingRecords.length) parts.push(`<span class="warn">Vault未送信のカルテ ${store.pendingRecords.length}件</span>`);
   if(store.lastOcrAt) parts.push(`最終読み取り ${fmtDT(store.lastOcrAt)}`);
+  document.getElementById('workerLine').innerHTML=workerLine();
   st.innerHTML=parts.join('　');
-  document.getElementById('ocrJobs').innerHTML=e.map(j=>`<div class="ocr-row">
-      <div><span class="err">エラー</span> ${eh(j.filename||'')}<div class="rm">${eh(j.error||'')}</div></div>
-      <div class="rac">
-        <button class="btn bo bsm" onclick="retryJob('${ea(j.id)}')">再読み取り</button>
-        <button class="btn bd2" onclick="deleteJob('${ea(j.id)}')">削除</button>
-      </div></div>`).join('');
+  const row=(left,right)=>`<div class="ocr-row"><div>${left}</div><div class="rac">${right||''}</div></div>`;
+  const nm=j=>eh(j.filename||'写真');
+  document.getElementById('ocrJobs').innerHTML=ocrJobs.map(j=>{
+    if(j.status==='queued') return row(`<span class="warn">読み取り待ち</span> ${nm(j)}<div class="rm">送信 ${ago(j.created_at)}${j.attempts?`・${j.attempts+1}回目の読み取り`:''}</div>`,
+      `<button class="btn bd2" onclick="deleteJob('${ea(j.id)}')">削除</button>`);
+    if(j.status==='processing') return row(`<span class="ok">読み取り中</span> ${nm(j)}<div class="rm">AI が読み取っています（開始から ${elapsed(j.started_at)}）</div>`);
+    if(j.status==='error') return row(`<span class="err">エラー</span> ${nm(j)}<div class="rm">${eh(j.error||'')}</div>`,
+      `<button class="btn bo bsm" onclick="retryJob('${ea(j.id)}')">再読み取り</button>
+        <button class="btn bd2" onclick="deleteJob('${ea(j.id)}')">削除</button>`);
+    return '';
+  }).join('');
+}
+function startAutoSync(){
+  if(autoTimer) clearInterval(autoTimer);
+  autoTimer=setInterval(()=>{
+    const busy=ocrJobs.some(j=>j.status==='queued'||j.status==='processing');
+    if(busy && cfg.token && document.visibilityState!=='hidden') syncJobs(false);
+    else renderJobs();   // 「○分前」の表示を進める
+  }, AUTO_SYNC_MS);
 }
 function fmtDT(iso){ const d=new Date(iso); return `${d.getMonth()+1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`; }
 async function retryJob(id){

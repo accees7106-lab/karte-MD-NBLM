@@ -41,7 +41,7 @@ const DONE = {
       warmup: { preset: null, changes: [] }, training: [], notes: 'ストレッチ中心', uncertain: [] },
   ] },
 };
-const QUEUED = { id: 'aaaaaaaa-0000-0000-0000-000000000002', status: 'queued', created_at: '2026-10-07T01:00:00Z' };
+const QUEUED = { id: 'aaaaaaaa-0000-0000-0000-000000000002', status: 'queued', filename: 'PXL_queued.jpg', created_at: new Date(Date.now() - 5 * 60000).toISOString(), attempts: 0 };
 const ERRJOB = { id: 'aaaaaaaa-0000-0000-0000-000000000003', status: 'error', filename: 'IMG_9.jpg', error: '読み取り結果の形式が不正です', created_at: '2026-10-07T01:00:00Z' };
 
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
@@ -55,7 +55,8 @@ async function setup(ctxOpts = {}) {
       localStorage.setItem('karte_last_export', new Date().toISOString());
     }
   }, [JSON.stringify(SEED)]);
-  const api = { posts: [], deletes: [], patches: [], feedback: [], records: [], recordsFail: false, jobs: [DONE, QUEUED, ERRJOB] };
+  const api = { posts: [], deletes: [], patches: [], feedback: [], records: [], recordsFail: false, jobs: [DONE, QUEUED, ERRJOB], gets: 0,
+    worker: { state: 'idle', updated_at: new Date().toISOString(), interval_sec: 300, last_error: null, last_error_at: null } };
   await ctx.route('**/api/records**', async route => {
     const req = route.request();
     assert.equal(req.headers()['authorization'], 'Bearer t');
@@ -74,7 +75,7 @@ async function setup(ctxOpts = {}) {
     const req = route.request();
     assert.equal(req.headers()['authorization'], 'Bearer t');
     const m = req.method();
-    if (m === 'GET') return route.fulfill({ json: { jobs: api.jobs } });
+    if (m === 'GET') { api.gets++; return route.fulfill({ json: { jobs: api.jobs, worker: api.worker } }); }
     if (m === 'POST') { api.posts.push(req.postDataJSON()); return route.fulfill({ json: { id: 'x', status: 'queued' } }); }
     if (m === 'PATCH') { const id = new URL(req.url()).searchParams.get('id'); api.patches.push([id, req.postDataJSON().status]); if (req.postDataJSON().status === 'imported') api.jobs = api.jobs.filter(j => j.id !== id); return route.fulfill({ json: {} }); }
     if (m === 'DELETE') { const id = new URL(req.url()).searchParams.get('id'); api.deletes.push(id); api.jobs = api.jobs.filter(j => j.id !== id); return route.fulfill({ json: { deleted: 1 } }); }
@@ -113,6 +114,31 @@ async function step(name, fn) {
     assert.match(st, /読み取り待ち 1件/);
     assert.match(st, /エラー 1件/);
     assert.match(await page.textContent('#ocrJobs'), /IMG_9\.jpg/);
+    assert.match(await page.textContent('#workerLine'), /ノートPC：待機中/);
+    assert.match(await page.textContent('#ocrJobs'), /読み取り待ち PXL_queued\.jpg\s*送信 5分前/);
+  });
+
+  await step('ノートPC の状態：学習中・直近のエラー・応答なし・読み取り中を表示し、自動で更新する', async () => {
+    const line = () => page.textContent('#workerLine');
+    api.worker = { state: 'learning', updated_at: new Date().toISOString(), interval_sec: 300,
+      last_error: 'claude -p が 300 秒で終わらなかったため止めました', last_error_at: new Date(Date.now() - 120000).toISOString() };
+    api.jobs = [QUEUED, ERRJOB, { id: 'aaaaaaaa-0000-0000-0000-000000000009', status: 'processing', filename: 'PXL_now.jpg',
+      created_at: new Date().toISOString(), started_at: new Date(Date.now() - 20000).toISOString() }];
+    const before = api.gets;
+    await page.evaluate(() => { AUTO_SYNC_MS = 300; startAutoSync(); });   // 読み取り待ちがあるので自動で取りに行く
+    await page.waitForFunction(() => document.getElementById('workerLine').textContent.includes('学習中'));
+    assert.ok(api.gets > before);
+    assert.match(await line(), /直近のエラー（2分前）：claude -p が 300 秒で終わらなかったため止めました/);
+    assert.match(await page.textContent('#ocrJobs'), /読み取り中 PXL_now\.jpg\s*AI が読み取っています（開始から 2\d秒）/);
+    api.worker = { state: 'idle', updated_at: new Date(Date.now() - 40 * 60000).toISOString(), interval_sec: 300 };
+    await page.waitForFunction(() => document.getElementById('workerLine').textContent.includes('応答なし'));
+    assert.match(await line(), /ノートPC：応答なし（最終確認 40分前）/);
+    api.worker = null;
+    await page.waitForFunction(() => document.getElementById('workerLine').textContent.includes('まだ状態の報告がありません'));
+    api.worker = { state: 'idle', updated_at: new Date().toISOString(), interval_sec: 300 };
+    api.jobs = [QUEUED, ERRJOB];
+    await page.evaluate(() => { AUTO_SYNC_MS = 15000; startAutoSync(); syncJobs(false); });
+    await page.waitForFunction(() => document.getElementById('workerLine').textContent.includes('待機中'));
   });
 
   await step('写真3枚を縮小 JPEG で送信し、送信時点の一覧を添える', async () => {
