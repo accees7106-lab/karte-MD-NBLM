@@ -2,3 +2,5 @@
 __pycache__/
 *.log
 node_modules/
+bfaf_profile/
+bfaf_structure.json
